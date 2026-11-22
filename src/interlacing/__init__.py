@@ -18,7 +18,7 @@ Layers, bottom up (each imports only from below):
 Public names are importable from the package root. Standard library only.
 """
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 _PUBLIC = {
     # base

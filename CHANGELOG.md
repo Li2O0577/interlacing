@@ -4,7 +4,7 @@ Versions before 1.0 may change any interface; each change is listed here. From 1
 by `interlacing` and the formats of graph files, run directories and journals change incompatibly only
 with a new major version.
 
-## Unreleased
+## 0.16.0
 
 - Security: `Catalog.function` lets through only functions defined in an allowed module. A name that reaches
   through an allowed module into one it imported (`mypkg.os.system`), a name with a `__` part, and a function
