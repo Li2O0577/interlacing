@@ -61,7 +61,7 @@ def test_the_reference_client_runs_a_graph_through_the_server(tmp_path):
             hello = await session.initialize()
             assert of(hello, 'serverInfo', 'server_info').name == 'interlacing' and hello.capabilities.tools is not None
             tools = {tool.name: tool for tool in (await session.list_tools()).tools}
-            assert sorted(tools) == ['answer', 'check', 'control', 'resume', 'runs', 'start', 'status', 'stop']
+            assert sorted(tools) == ['answer', 'check', 'control', 'guide', 'resume', 'runs', 'start', 'status', 'stop']
             assert of(tools['start'], 'inputSchema', 'input_schema')['required'] == ['graph']
 
             checked = await session.call_tool('check', {'graph': REVIEWED})
