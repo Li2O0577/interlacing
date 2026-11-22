@@ -244,6 +244,7 @@ class Node(ABC):
     #: When a node it manages fails while this node is running, the failure comes to it (``ctx.failures``)
     #: instead of failing the run: the member is stopped and this node decides what follows.
     oversees: bool = False
+    made_by: dict | None = None              # for a node an agent hired: {"node": who hired it, "template": from which}
 
     def __init__(self, id: str, *, inputs: Iterable[Port] | None = None, outputs: Iterable[Port] | None = None,
                  firing: Firing | None = None):

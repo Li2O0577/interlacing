@@ -1,5 +1,6 @@
 """The command line.
 
+    interlacing guide  [--allow MODULE]...
     interlacing check  graph.json [--allow MODULE]... [--processes] [--tools DIRECTORY] [--apps DIRECTORY] [--remote ADDRESS]...
     interlacing run    graph.json --dir RUN [--input NAME=VALUE]... [--allow MODULE]... [--processes] [--tools DIRECTORY] [--workers N]
                          [--time-limit SECONDS] [--workspace DIRECTORY] [--apps DIRECTORY] [--remote ADDRESS]...
@@ -12,6 +13,7 @@
                          [--files DIRECTORY] [--tools DIRECTORY] [--apps DIRECTORY] [--remote ADDRESS]...
     interlacing node-serve MODULE:NAME [--listen HOST:PORT] [--make] [--token-env NAME]
 
+``guide`` prints how a graph is written and the functions the modules ``--allow`` names may give it.
 ``--tools`` names a tool pool: a directory of tool files the graph's agents may be given by path. ``--apps``
 names a directory whose folders may be nodes, each an application with a ``node.json``. ``--remote`` names
 an address of a served node the graph may reach. ``node-serve`` serves one node for graphs elsewhere: it
@@ -22,7 +24,7 @@ run that is not being run now; it holds when the run is resumed.
 
 A graph file may take text (a prompt, say) from files in its own directory: ``{"file": "prompts/lead.md"}``.
 
-Every command but ``serve`` prints JSON (``node-serve`` one line, then serves); ``serve`` is the MCP server in ``interlacing.serve``. The exit
+Every command but ``serve`` and ``guide`` prints JSON (``node-serve`` one line, then serves); ``serve`` is the MCP server in ``interlacing.serve``. The exit
 status says how a run stands: 0 done, 1 failed or refused, 3 waiting for a person, 4 stopped.
 """
 from __future__ import annotations
@@ -98,6 +100,8 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--remote", action="append", default=[], metavar="ADDRESS",
                              help="tcp://host:port of a served node the graph may reach (repeatable)")
 
+    guide = commands.add_parser("guide", help="say how a graph is written, and which functions it may name")
+    guide.add_argument("--allow", action="append", default=[], metavar="MODULE", help="a module whose functions to list (repeatable)")
     check = commands.add_parser("check", help="build the graph and describe it, without running anything")
     check.add_argument("graph")
     reach(check)
@@ -154,8 +158,6 @@ def _node_serve(args, out) -> int:
     module, _, name = args.target.partition(":")
     if not name:
         module, _, name = args.target.rpartition(".")
-    if os.getcwd() not in sys.path:
-        sys.path.insert(0, os.getcwd())       # a module beside where the command is run can be named
     try:
         found: Any = importlib.import_module(module)
         for part in name.split("."):
@@ -179,9 +181,16 @@ def _node_serve(args, out) -> int:
 
 
 def main(argv=None, out=None) -> int:
+    import os
     out = out or sys.stdout
     args = _parser().parse_args(argv)
+    if os.getcwd() not in sys.path:
+        sys.path.insert(0, os.getcwd())       # as with python -m: a module beside where the command is run can be named
     try:
+        if args.command == "guide":
+            from .spec import Catalog, guide
+            out.write(guide(Catalog(allow=args.allow)))
+            return 0
         if args.command == "check":
             state, code = check(_description(args.graph), allow=args.allow, processes=args.processes, files=_beside(args.graph), tools=args.tools, apps=args.apps,
                                  remotes=args.remote), 0
@@ -213,8 +222,13 @@ def main(argv=None, out=None) -> int:
     except (SpecError, JournalError, ValueError) as exc:
         state, code = {"status": "refused", "error": str(exc)}, 1
     encoding = (getattr(out, "encoding", None) or "utf-8").lower().replace("-", "")
-    json.dump(state, out, ensure_ascii=encoding != "utf8", indent=2)     # a console that is not UTF-8 gets escapes
-    out.write("\n")
+    try:
+        json.dump(state, out, ensure_ascii=encoding != "utf8", indent=2)     # a console that is not UTF-8 gets escapes
+        out.write("\n")
+        out.flush()
+    except BrokenPipeError:                   # the reader went away (| head): what it did not read is not an error
+        if out is sys.stdout:                 # and Python's own flush at exit must not fail on it either
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
     return code
 
 

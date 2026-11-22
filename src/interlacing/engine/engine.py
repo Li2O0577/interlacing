@@ -258,7 +258,7 @@ class Engine:
         inputs = dict(inputs or {})
         unknown = inputs.keys() - self._inputs.keys()
         if unknown:
-            raise RunError(f"the graph has no input {sorted(unknown)}")
+            raise RunError(f"the graph has no input {sorted(unknown)}; its inputs are {sorted(self._inputs)}")
         sched = self._sched
         with self._lock:
             sent = []
@@ -646,7 +646,7 @@ class Engine:
         names = frozenset([ports] if isinstance(ports, str) else ports)
         unknown = names - set(state.ports)
         if unknown:
-            raise NodeError(f"{state.node.id} has no input port {', '.join(sorted(unknown))}")
+            raise NodeError(f"{state.node.id} has no input port {', '.join(sorted(unknown))}; its inputs are {sorted(state.ports)}")
         return names
 
     # ---- rejections: a receiver says what came is not what it expected --------------------------------
@@ -1428,7 +1428,7 @@ class Engine:
         try:
             feeds, names = state.outs[port]
         except KeyError:
-            raise NodeError(f"{state.node.id} has no output port {port!r}") from None
+            raise NodeError(f"{state.node.id} has no output port {port!r}; its outputs are {sorted(state.outs)}") from None
         if port in state.calls:
             raise NodeError(f"{state.node.id}.{port} makes a call: use ctx.call, not emit")
         bodies = self._bodies(state, port, payload, feeds, round, act)
@@ -1783,7 +1783,7 @@ class Engine:
             return
         described = None
         if self._recorder is not None:
-            if change.added and self._rebuild is None:
+            if self._rebuild is None and not all(self._remakeable(node) for node in change.added):
                 raise GraphError("this run is journaled, so a node it adds must be made again when the run is taken "
                                  "up: give the engine rebuild=")
             described = change.describe()
@@ -1823,9 +1823,29 @@ class Engine:
         finally:
             self._take_back(state)
 
+    def _remakeable(self, node: Node) -> bool:
+        """Whether a node added at run time can be made again without ``rebuild``: its maker (an agent that hired
+        it) is in the graph and can make it again from the same template."""
+        made_by = getattr(node, "made_by", None)
+        if not made_by:
+            return False
+        maker = next((n for n in self.graph.nodes if n.id == made_by.get("node")), None)
+        return maker is not None and callable(getattr(maker, "remake", None))
+
+    def _remade(self, described: dict) -> Node:
+        """A node added at run time, made again by what made it (``rebuild``, when given, comes first)."""
+        if self._rebuild is not None:
+            return self._rebuild(described)
+        made_by = described.get("made_by") or {}
+        maker = next((n for n in self.graph.nodes if n.id == made_by.get("node")), None)
+        if maker is None or not callable(getattr(maker, "remake", None)):
+            raise GraphError(f"node {described.get('id')!r} was added while the run went on, and nothing was given "
+                             f"that can make it again (rebuild)")
+        return getattr(maker, "remake")(made_by["template"], described["id"])
+
     def _remake(self, described: list) -> int:
         """Make again, while the run is being taken up, a change the journal holds."""
-        return self._make(Change.of(described, self._rebuild), None, consider=False)
+        return self._make(Change.of(described, self._remade), None, consider=False)
 
     def _make(self, change: Change, caller: str | None, consider: bool = True) -> int:
         """Apply ``change`` to the graph and to what the run keeps of it. Called under the lock. Returns how

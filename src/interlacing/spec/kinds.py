@@ -37,6 +37,9 @@ def port_of(described, catalog=None) -> Port:
     """A port from its description, or from a bare name. Its checks are functions, named as functions are."""
     if isinstance(described, str):
         return Port(described)
+    if not isinstance(described, Mapping) or not isinstance(described.get("name"), str):
+        from .catalog import SpecError
+        raise SpecError(f'a port is a name, or a mapping with a name like {{"name": "x", "schema": "int"}}, not {described!r}')
     checks = described.get("check") or ()
     checks = [checks] if isinstance(checks, str) else list(checks)
     if checks and catalog is None:
@@ -50,6 +53,9 @@ def port_of(described, catalog=None) -> Port:
 
 def ports(description: Mapping, side: str, catalog=None) -> list[Port] | None:
     given = description.get(side)
+    if given is not None and (isinstance(given, (str, Mapping)) or not isinstance(given, (list, tuple))):
+        from .catalog import SpecError
+        raise SpecError(f'{side} is a list of ports, like ["text"], not {given!r}')
     return None if given is None else [port_of(port, catalog) for port in given]
 
 
@@ -63,8 +69,21 @@ def _optional(catalog, name):
 
 
 def function(d, catalog, graphs):
-    return FunctionNode(d["id"], catalog.function(d["config"]["function"]), inputs=ports(d, "inputs", catalog) or (),
-                        outputs=ports(d, "outputs", catalog) or (), firing=d.get("firing"), context=d["config"].get("context", False))
+    """A function node. Ports it does not list are read from the function, as in Python: each parameter is an
+    input, the output is ``out``; a first parameter called ``ctx`` is the context, unless ``context`` says."""
+    from .catalog import SpecError
+    from ..base import NodeError
+    f = catalog.function(d["config"]["function"])
+    inputs, outputs, context = ports(d, "inputs", catalog), ports(d, "outputs", catalog), d["config"].get("context")
+    if inputs is None or outputs is None or context is None:
+        try:
+            read = FunctionNode.of(f, d["id"])
+        except NodeError as exc:
+            raise SpecError(f"{exc}; list its inputs and outputs") from None
+        inputs = list(read.inputs.values()) if inputs is None else inputs
+        outputs = list(read.outputs.values()) if outputs is None else outputs
+        context = read.context if context is None else context
+    return FunctionNode(d["id"], f, inputs=inputs, outputs=outputs, firing=d.get("firing"), context=bool(context))
 
 
 def _agent(d, catalog, area) -> dict:

@@ -405,7 +405,7 @@ lead = AgentNode("lead", model, resident=True, hire=3, templates={"researcher": 
 | `fail(reason)` | 认为工作做不成了，让整次运行以这个理由失败 |
 
 - **各自的目录：** 有工作区时，用描述写的下属，目录放在上级的目录下面（`lead/lead-r1/`），它只能写自己的目录和共享目录，上级能读到。
-- **底下是什么：** 这些都是 `ctx.change`：先检查，再生效，写进日志，接上运行时重做（运行目录会自动给出 `rebuild`）。新加的 `Change` 操作有两个：`ports(节点, inputs=, outputs=)`，在运行中给已有节点加端口（加的端口不做类型检查，节点通过 `Node.add_ports` 得知）；`manage(上级, 下属...)`。整个变化被拒绝时，加上的端口也会退掉。
+- **底下是什么：** 这些都是 `ctx.change`：先检查，再生效，写进日志，接上运行时重做。下属记得自己是谁按哪个模板招的（描述里的 `made_by`），恢复时由招它的 agent 按同一个模板再造一次，所以在 Python 里用 `Engine(..., journal=...)` 也不需要给 `rebuild`。新加的 `Change` 操作有两个：`ports(节点, inputs=, outputs=)`，在运行中给已有节点加端口（加的端口不做类型检查，节点通过 `Node.add_ports` 得知）；`manage(上级, 下属...)`。整个变化被拒绝时，加上的端口也会退掉。
 - **下属失败：** 能招人的 agent 会接手下属的失败（见“每个节点的开关”里的“下属失败交给上级”）。`wait` 里会看到一条 `[failed]`，写着谁、哪一轮、什么错，它可以用 `control` 重启、`dismiss` 解雇，或者 `fail` 放弃。
 - **还是只走连好的线：** 招人只是多了节点和线，没有“按名字给谁发消息”。
 
@@ -498,7 +498,7 @@ def plan(ctx, task):
 - 套上之后按建图的全部规则检查。不通过时 `ctx.change` 抛出 `GraphError`，图一点都不变，节点可以接住它换一种做法；通过了就立刻生效：新节点开始按自己的触发方式运行，新边开始投递，删掉的边上还在等的信封被丢弃，数目报给观察函数。
 - 不能删自己，也不能删正在运行的节点。`Engine(max_nodes=N)` 给图能长到多大设上限。
 - 观察函数收到 `changed`（`node`、`round`、`added`、`removed`、`dropped`、`graph` 新摘要）；`Engine.graph` 是当前的图，`Result` 里有新节点的轮次和新的图输出。
-- 有日志时，改动作为普通数据和提出它的那次激活一起写进日志；恢复时按原来的顺序重做，所以长出来的图在恢复后还在。日志里新节点存的是它的描述，恢复时要把描述变回节点：`Engine(..., rebuild=函数)`，例如 `lambda d: load_node(d, Catalog(allow=[...]))`；运行目录（`Run`、命令行、MCP 服务）自动用图文件的目录做这件事。没有 `rebuild` 时，有日志的运行不能加节点。块和 `GraphNode` 不能这样加进去，因为它们的描述里没有里面那张图。
+- 有日志时，改动作为普通数据和提出它的那次激活一起写进日志；恢复时按原来的顺序重做，所以长出来的图在恢复后还在。日志里新节点存的是它的描述，恢复时要把描述变回节点：`Engine(..., rebuild=函数)`，例如 `lambda d: load_node(d, Catalog(allow=[...]))`；运行目录（`Run`、命令行、MCP 服务）自动用图文件的目录做这件事。没有 `rebuild` 时，有日志的运行只能加 agent 招来的下属（它们由招它们的 agent 按模板再造），不能加别的节点。块和 `GraphNode` 不能这样加进去，因为它们的描述里没有里面那张图。
 
 两者的区别：`ctx.change` 改的是这张图，新节点和别的节点一样一直在，可以被反复找到、可以连到已有的节点上；`SpawnNode` 跑的图只活一次激活。
 
@@ -522,6 +522,13 @@ graph = Chain(planner, grow).build(DEFAULT)
 | `max_nodes` | 一张图最多多少个节点，块里面的也算 | 50 |
 | `depth` | 新图里还能再嵌几层 `SpawnNode` | 0，不允许 |
 | `max_runs` | 外面一次运行里最多跑几张图 | 不限 |
+
+要把它交给智能体当工具，用 `grow.tool()`：返回的 `Tool` 的说明里已经带着图的格式（`GUIDE`）和这个节点的目录允许的函数及其签名，模型不需要别的提示就能写出图：
+
+```python
+agent = AgentNode("designer", model, tools=[grow.tool()])
+graph = GraphBuilder().add(agent, grow).connect("designer.grow", "grow.request", "call")...
+```
 
 描述建不出来、超过上限、或者新图运行失败时，默认把 `{"error": ...}` 作为结果发回去，发送方可以换一种写法再试；智能体会在工具回答里看到原因。`strict=True` 时改成让这个节点失败，整次运行随之失败。
 
@@ -610,6 +617,14 @@ again = read("graph.json", Catalog(allow=["mypkg"]))         # again.digest == g
 
 `catalog.register(kind, loader)` 加入自己的节点种类。
 
+`allow` 只放行在允许的模块里**定义**的函数：`mypkg.os.system` 这种借允许的模块去够它导入的别的模块的写法会被拒绝，从别处导入进来的函数也不行（用 `@node` 包过的函数按被包的那个函数算）。模型写的图、MCP 客户端送来的图都受这条约束。
+
+### 格式说明：`GUIDE` 和 `functions`
+
+`interlacing.spec.GUIDE` 是一页纸的图格式说明，写给第一次写图的人和模型看；`functions(catalog)` 列出目录允许的函数，每个带签名和文档的第一行；`guide(catalog)` 是两者合在一起。MCP 服务有同名的 `guide` 工具，命令行是 `interlacing guide --allow mypkg`，`SpawnNode.tool()` 的说明里也是它。
+
+写图时常错的地方，`GUIDE` 里都写了：边写成 `{"from": "a.out", "to": "b.text"}`；方法的图输入叫 `in`、输出叫 `out`；fan 的输出是各分支输出的列表；方法里的节点可以直接是另一个方法。写错形状时，报错会说出正确的写法；端口或图输入写错时，报错会列出有哪些。
+
 ### 只写不同的地方
 
 搭自己的框架时，图文件里只需要写结构，和你不想用默认值的那几项。
@@ -646,7 +661,20 @@ again = read("graph.json", Catalog(allow=["mypkg"]))         # again.digest == g
 ```json
 {"method": "loop", "max_rounds": 4, "until": "mypkg.checks.good_enough", "nodes": [
   {"id": "draft", "kind": "agent", "model": "anthropic:some-model", "system": "..."},
-  {"id": "tidy", "kind": "function", "function": "mypkg.steps.tidy", "inputs": ["x"], "outputs": ["y"]}
+  {"id": "tidy", "kind": "function", "function": "mypkg.steps.tidy"}
+]}
+```
+
+函数节点和在 Python 里一样从函数读端口：每个参数是一个输入，输出叫 `out`，第一个参数叫 `ctx` 时它是上下文而不是输入。只有要改名或加检查时才需要写 `inputs`、`outputs`（或 `"context": true/false`）。
+
+方法里的节点可以直接写成另一个方法，它会变成一个装着那张图的节点，名字是它的 `id`，没写就用方法名（`fan`、`fan_2`……）。和写 `{"kind": "graph", "graph": {...}}` 是一回事：
+
+```json
+{"method": "chain", "nodes": [
+  {"id": "clean", "kind": "function", "function": "mypkg.steps.clean"},
+  {"method": "fan", "nodes": [{"id": "count", "kind": "function", "function": "mypkg.steps.count"},
+                              {"id": "top", "kind": "function", "function": "mypkg.steps.top"}]},
+  {"id": "report", "kind": "function", "function": "mypkg.steps.report"}
 ]}
 ```
 
@@ -656,6 +684,7 @@ again = read("graph.json", Catalog(allow=["mypkg"]))         # again.digest == g
 
 | 命令 | 作用 |
 |---|---|
+| `guide [--allow 模块]...` | 打印图的格式说明，和这些模块允许图使用的函数（这一条输出文字，不是 JSON） |
 | `check graph.json` | 只建图不运行，输出摘要、节点、输入输出；不需要密钥 |
 | `run graph.json --dir RUN` | 在新目录里开始一次运行；`--input 名=值`（值按 JSON 读，读不成就当文字）或 `--inputs 文件`；`--time-limit 秒` 是一次激活的时间上限；`--budget 名=数`（可以重复）是整次运行的用量上限，例如 `--budget tokens=200000`；`--workspace 目录` 是节点的工作目录，不给就是运行目录里的 `files/` |
 | `resume --dir RUN` | 从日志接着跑：等人回答之后、失败修好之后、被中断之后都用它；`--budget 名=数` 换一个更大的预算再继续 |
@@ -664,6 +693,8 @@ again = read("graph.json", Catalog(allow=["mypkg"]))         # again.digest == g
 | `files --dir RUN` | 列出工作区里的文件，以及每个文件是哪个节点在第几次激活里写的 |
 | `control 动作 节点... --dir RUN [--team]` | 暂停、恢复、停止或重启节点，见“每个节点的开关，以及谁管谁”；运行没在进行时写进日志，下次 `resume` 生效 |
 | `node-serve 模块:名字` | 把一个节点放在这个进程里服务，供别处的 `RemoteNode` 使用；`--listen 地址:端口`、`--token-env 变量名`、`--make`，见“在别的进程或别的机器上的节点” |
+
+命令所在的目录会加进模块搜索路径（和 `python -m` 一样），所以旁边的 `steps.py` 可以直接 `--allow steps`。输出被提前关掉时（`| head`）不算出错。
 
 `check` 和 `run` 用 `--allow 模块`（可以重复）、`--processes`、`--tools 工具池目录`、`--apps 应用目录` 和 `--remote 地址` 划定图能够到的范围，和 `Catalog` 的含义相同；不给就什么都够不到。范围在 `run` 时写进运行目录，`resume` 沿用它。`--workers N` 是并行运行节点的线程数。
 
@@ -703,6 +734,7 @@ lock            有进程正在运行这张图时存在，里面写着是哪个�
 
 | 工具 | 参数 | 作用 |
 |---|---|---|
+| `guide` | 无 | 图的格式说明，和这个服务允许图使用的函数（带签名）；客户端写图之前先读它 |
 | `check` | `graph` | 只建图不运行，返回摘要、节点、输入输出 |
 | `start` | `graph`、`inputs`、`wait` | 开始一次运行，返回运行的名字和状态。`wait: false` 时立即返回 `running`，运行在服务里继续 |
 | `status` | `run` | 运行的状态和待答的问题 |

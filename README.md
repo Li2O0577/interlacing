@@ -134,6 +134,7 @@ team = Fan(analyst, modeller,                                   # each member ge
 ```python
 grow = SpawnNode("grow", Catalog(allow=["my_steps"]), max_nodes=20)
 graph = Chain(planner, grow).build(DEFAULT)                    # planner sends {"graph": ..., "inputs": ...}
+designer = AgentNode("designer", model, tools=[grow.tool()])   # or as a tool that tells the model the format
 ```
 
 **Runs that are looked after.**
@@ -192,7 +193,8 @@ solve = IsolatedNode("solve", "mypkg.solver.solve", inputs=[Port("problem")], ou
 ```
 
 ```sh
-cd examples/data && export PYTHONPATH=.
+cd examples/data
+interlacing guide  --allow steps                         # how a graph is written, and the functions it may name
 interlacing check  release.json --allow steps
 interlacing run    release.json --dir /tmp/run --allow steps --input topic=tides    # waiting for a person, exit code 3
 interlacing answer --dir /tmp/run --json '{"approved": true}'
@@ -208,7 +210,7 @@ A run is a directory. A person in the graph who has not answered yet does not ke
   "args": ["serve", "--runs", "/path/to/runs", "--allow", "mypkg", "--budget", "tokens=500000"]}}}
 ```
 
-Tool calls are answered side by side. `start` and `resume` take `wait: false` to return at once; the run is then asked about with `status` and ended early with `stop`.
+A client reads `guide` first: the format, and the functions the server lets a graph name. Tool calls are answered side by side. `start` and `resume` take `wait: false` to return at once; the run is then asked about with `status` and ended early with `stop`.
 
 Model keys are read from the environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and their `_BASE_URL`), and are never written to a graph file, a run directory or a journal.
 
@@ -232,7 +234,7 @@ The kernel carries information and looks after the run. How a model thinks, how 
 | Engine | `interlacing.engine` | `Engine`, `Result`, `RunError`, `Journal`, `Transport` |
 | Parts | `interlacing.nodes`, `.protocols`, `.methods`, `.models` | `FunctionNode`, `node`, `as_node`, `AgentNode`, `ProcessNode`, `FolderNode`, `SourceNode`, `SinkNode`, `HumanNode`, `GraphNode`, `IsolatedNode`, `WorkerNode`, `RemoteNode`, `serve_node`, `Desk`; `Workspace`, `ToolPool`; `Chain`, `Loop`, `Fan`, `Tree`, `Star`, `Governed`, `Pool` |
 | Blocks | `interlacing.blocks` | `Block`, `seq`, `par` |
-| Graphs as data | `interlacing.spec` | `dump`, `load`, `read`, `write`, `Catalog`, `SpawnNode` |
+| Graphs as data | `interlacing.spec` | `dump`, `load`, `read`, `write`, `Catalog`, `SpawnNode`, `GUIDE`, `guide`, `functions` |
 | Outside | `interlacing.runs`, `interlacing.cli`, `interlacing.serve`, `interlacing.quick` | `Run`; the command `interlacing`; the MCP server; `run` |
 
 Each layer uses only the layers below it. The engine knows no particular node, protocol or method; a test in `tests/test_engine.py` holds it to that. Inside, the engine is a few small parts, each with one job: the mailboxes a graph becomes (`wiring`), when a node may run (`scheduler`), what is checked and what follows a problem (`checks`), the budget (`ledger`), the journal (`recorder`), time limits (`clock`).

@@ -128,7 +128,8 @@ class Change:
         for op in self.ops:
             kind = op[0]
             if kind == "add":
-                out.append(["add", op[1].describe()])
+                made_by = getattr(op[1], "made_by", None)     # who made it, and from what: enough to make it again
+                out.append(["add", {**op[1].describe(), **({"made_by": dict(made_by)} if made_by else {})}])
             elif kind == "connect":
                 out.append(["connect", op[1].describe()])
             elif kind == "output":

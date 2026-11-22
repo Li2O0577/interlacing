@@ -144,7 +144,7 @@ def test_a_description_that_is_wrong_says_where():
     cases = [({'nodes': [{'id': 'a', 'kind': 'teleport'}]}, "unknown kind of node: 'teleport'"),
              ({'nodes': [{'kind': 'function'}]}, 'a node needs an id and a kind'),
              ({'nodes': [{'id': 'a', 'kind': 'function', 'inputs': ['x']}]}, "a: a function node needs 'function'"),
-             ({'nodes': [node], 'edges': [{'from': 'a.y'}]}, "lacks 'to'"),
+             ({'nodes': [node], 'edges': [{'from': 'a.y'}]}, 'an edge is written'),
              ({'nodes': [node], 'edges': [{'from': 'a.y', 'to': 'b.x'}]}, "no node 'b'"),
              ({'nodes': [{**node, 'inputs': [{'name': 'x', 'schema': 'colour'}]}]}, "a: unknown type in a schema: 'colour'"),
              ({'method': 'spiral', 'nodes': [node]}, "unknown method: 'spiral'"),
@@ -180,3 +180,100 @@ def test_a_host_can_add_its_own_kind_of_node(tmp_path):
     (tmp_path / 'bad.json').write_text('{not json')
     with pytest.raises(SpecError, match='not JSON'):
         read(tmp_path / 'bad.json')
+
+
+borrowed = __import__("os").getcwd     # a function from elsewhere, here under a name of this module
+from interlacing import node as _node_decorator   # noqa: E402
+
+
+@_node_decorator
+def decorated(x: int) -> int:
+    return x + 2
+
+
+def test_a_catalog_reaches_only_what_its_modules_define():
+    catalog = Catalog(allow=[HERE])
+    assert catalog.function(f'{HERE}.add_one') is add_one
+    assert catalog.function(f'{HERE}.decorated') is decorated          # made into a node here, defined here
+    for reaching, why in [(f'{HERE}.json.loads', 'reaches into the module json'),
+                          (f'{HERE}.sys.exit', 'reaches into the module sys'),
+                          (f'{HERE}.borrowed', 'is defined in'),
+                          (f'{HERE}.__loader__.load_module', 'not a function a graph may name')]:
+        with pytest.raises(SpecError, match=why):
+            catalog.function(reaching)
+
+
+def test_a_graph_written_at_run_time_cannot_reach_through_an_allowed_module():
+    from interlacing import run
+    from interlacing.spec import SpawnNode
+    grow = SpawnNode('grow', Catalog(allow=[HERE]))
+    request = {'graph': {'nodes': [{'id': 'x', 'kind': 'function', 'function': f'{HERE}.sys.exit',
+                                    'inputs': ['code'], 'outputs': ['out']}],
+                         'inputs': {'c': 'x.code'}, 'outputs': {'o': 'x.out'}}, 'inputs': {'c': 3}}
+    answer = run(grow, {'request': request}).last('result')
+    assert 'reaches into the module sys' in answer['error']
+
+
+def words(text: str) -> int:
+    return len(text.split())
+
+
+def shout(text: str) -> str:
+    return text.upper()
+
+
+def both(x: list) -> str:
+    return f'{x[0]} {x[1]}'
+
+
+def counted(ctx, text: str) -> int:
+    ctx.emit('out', len(text))
+
+
+def test_a_function_node_reads_its_ports_from_the_function_as_in_python():
+    graph = load({'method': 'chain', 'nodes': [{'id': 'w', 'kind': 'function', 'function': f'{HERE}.words'}]},
+                 Catalog(allow=[HERE]))
+    node = graph.node('w')
+    assert list(node.inputs) == ['text'] and list(node.outputs) == ['out'] and not node.context
+    assert Engine(graph).run({'in': 'a b c'}).outputs == {'out': [3]}
+    with_ctx = load({'nodes': [{'id': 'c', 'kind': 'function', 'function': f'{HERE}.counted'}],
+                     'inputs': {'t': 'c.text'}, 'outputs': {'n': 'c.out'}}, Catalog(allow=[HERE]))
+    assert with_ctx.node('c').context and Engine(with_ctx).run({'t': 'four'}).outputs == {'n': [4]}
+    again = load(dump(graph), Catalog(allow=[HERE]))                 # what is written out builds the same graph
+    assert again.digest == graph.digest
+
+
+def test_a_method_may_be_written_in_place_among_the_nodes_of_another():
+    described = {'method': 'chain', 'nodes': [
+        {'id': 'up', 'kind': 'function', 'function': f'{HERE}.shout'},
+        {'method': 'fan', 'nodes': [{'id': 'w', 'kind': 'function', 'function': f'{HERE}.words'},
+                                    {'id': 's', 'kind': 'function', 'function': f'{HERE}.shout'}]},
+        {'id': 'pair', 'method': 'chain', 'nodes': [{'id': 'b', 'kind': 'function', 'function': f'{HERE}.both'}]}]}
+    graph = load(described, Catalog(allow=[HERE]))
+    assert [node.id for node in graph.nodes] == ['up', 'fan', 'pair']
+    assert Engine(graph).run({'in': 'a b'}).outputs == {'out': ['2 A B']}
+
+
+def test_parts_written_in_the_wrong_shape_are_refused_with_the_right_one():
+    node = {'id': 'a', 'kind': 'function', 'function': f'{HERE}.add_one', 'inputs': ['x'], 'outputs': ['y']}
+    cases = [({'nodes': [node], 'edges': [['a.y', 'a.x']]}, 'an edge is written'),
+             ({'nodes': [node], 'inputs': ['a.x']}, 'map each name to "node.port"'),
+             ({'nodes': 'a'}, 'nodes is a list'),
+             ({'nodes': [{**node, 'inputs': 'x'}]}, 'inputs is a list of ports'),
+             ({'nodes': [{**node, 'inputs': [3]}]}, 'a port is a name'),
+             ({'nodes': [node], 'manages': ['a']}, 'manages maps a manager')]
+    for description, message in cases:
+        with pytest.raises(SpecError, match=message):
+            load(description, Catalog(allow=[HERE]))
+
+
+def test_a_wrong_port_or_input_is_answered_with_the_ones_there_are():
+    from interlacing import Engine
+    catalog = Catalog(allow=[__name__])
+    with pytest.raises(SpecError, match=r"has no input port 'txt'; its inputs are \['text'\]"):
+        load({'nodes': [{'id': 'a', 'kind': 'function', 'function': f'{__name__}.words'},
+                        {'id': 'b', 'kind': 'function', 'function': f'{__name__}.words'}],
+              'edges': [{'from': 'a.out', 'to': 'b.txt'}]}, catalog)
+    graph = load({'method': 'chain', 'nodes': [{'id': 'a', 'kind': 'function', 'function': f'{__name__}.words'}]}, catalog)
+    with pytest.raises(Exception, match=r"no input \['text'\]; its inputs are \['in'\]"):
+        Engine(graph).run({'text': 'x'})

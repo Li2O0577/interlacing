@@ -92,23 +92,40 @@ def load(description: Mapping, catalog: Catalog | None = None) -> Graph:
         if "method" in description:
             return _method(description, catalog, graphs).build(catalog.protocols)
         builder = GraphBuilder()
-        for node in _several(description.get("nodes", ())):
+        for node in _several(_listed(description, "nodes")):
             builder.add(_node(node, catalog, graphs))
-        for edge in description.get("edges", ()):
+        for edge in _listed(description, "edges"):
+            if not isinstance(edge, Mapping) or not isinstance(edge.get("from"), str) or not isinstance(edge.get("to"), str):
+                raise SpecError(f'an edge is written {{"from": "node.port", "to": "node.port"}}, not {edge!r}')
             builder.connect(edge["from"], edge["to"], edge.get("protocol", "value"), id=edge.get("id"),
                             back=edge.get("back", False), max_rounds=edge.get("max_rounds"),
                             challenges=edge.get("challenges"))
-        for name, end in description.get("inputs", {}).items():
-            builder.input(name, end)
-        for name, end in description.get("outputs", {}).items():
-            builder.output(name, end)
-        for manager, members in description.get("manages", {}).items():
+        for side in ("inputs", "outputs"):
+            ends = description.get(side, {})
+            if not isinstance(ends, Mapping) or not all(isinstance(end, str) for end in ends.values()):
+                raise SpecError(f'a graph\'s {side} map each name to "node.port", like {{"text": "clean.text"}}, not {ends!r}')
+            for name, end in ends.items():
+                (builder.input if side == "inputs" else builder.output)(name, end)
+        manages = description.get("manages", {})
+        if not isinstance(manages, Mapping):
+            raise SpecError(f'manages maps a manager to the nodes it manages, like {{"lead": ["a", "b"]}}, not {manages!r}')
+        for manager, members in manages.items():
             builder.manage(manager, *([members] if isinstance(members, str) else members))
         return builder.compile(catalog.protocols)
     except KeyError as exc:
         raise SpecError(f"the description lacks {exc.args[0]!r}") from None
     except (GraphError, NodeError, PortError, SchemaError) as exc:
         raise SpecError(str(exc)) from None
+    except (TypeError, AttributeError) as exc:      # a part written in a shape no check above foresaw
+        raise SpecError(f"the description is not shaped as a graph is ({exc}); see interlacing.spec.GUIDE") from None
+
+
+def _listed(description: Mapping, key: str) -> list:
+    """A part of a description that is a list (nodes, edges), refused in any other shape."""
+    given = description.get(key, ())
+    if isinstance(given, (str, bytes, Mapping)) or not isinstance(given, (list, tuple)):
+        raise SpecError(f"{key} is a list, not {given!r}")
+    return list(given)
 
 
 def _several(parts) -> list:
@@ -152,7 +169,8 @@ def _node(given: Mapping, catalog: Catalog, graphs: Mapping) -> Node:
     if not isinstance(given, Mapping) or "id" not in given or "kind" not in given:
         raise SpecError(f"a node needs an id and a kind: {given!r}")
     config = {**catalog.defaults.get(given["kind"], {}),
-              **{key: value for key, value in given.items() if key not in _NODE_KEYS}, **given.get("config", {})}
+              **{key: value for key, value in given.items() if key not in _NODE_KEYS and key != "made_by"},
+              **given.get("config", {})}
     time_limit = given.get("time_limit", config.pop("time_limit", None))
     on_correction = given.get("on_correction", config.pop("on_correction", None))
     oversees = given.get("oversees", config.pop("oversees", None))
@@ -184,10 +202,28 @@ def _part(given: Mapping, catalog: Catalog, graphs: Mapping):
     return _method(given, catalog, graphs) if "method" in given else _node(given, catalog, graphs)
 
 
+def _member(part, catalog: Catalog, graphs: Mapping, taken: set) -> Node:
+    """A part of a chain, loop or fan: a node, or a method written in place, which becomes a node holding the
+    graph it builds (named by its ``id``, or else by the method: ``fan``, ``fan_2``...)."""
+    if not (isinstance(part, Mapping) and "method" in part):
+        return _node(part, catalog, graphs)
+    id = part.get("id")
+    if id is None:
+        base = str(part["method"])
+        id = next(name for name in (base, *(f"{base}_{i}" for i in range(2, len(taken) + 3))) if name not in taken)
+    inner = {key: value for key, value in part.items() if key not in ("id", "firing")}
+    built = load({**inner, "graphs": {**graphs, **inner.get("graphs", {})}}, catalog.inside(id))
+    return GraphNode(id, built, catalog.protocols, firing=part.get("firing"))
+
+
 def _method(d: Mapping, catalog: Catalog, graphs: Mapping):
     name = d["method"]
     options = {"protocol": d["protocol"]} if "protocol" in d else {}
-    nodes = [_node(node, catalog, graphs) for node in _several(d.get("nodes", ()))]
+    nodes: list[Node] = []
+    taken: set[str] = set()
+    for part in _several(_listed(d, "nodes")):
+        nodes.append(_member(part, catalog, graphs, taken))
+        taken.add(nodes[-1].id)
     if name == "chain":
         return Chain(*nodes, **options)
     if name == "loop":
@@ -198,7 +234,7 @@ def _method(d: Mapping, catalog: Catalog, graphs: Mapping):
                    join=_node(d["join"], catalog, graphs) if d.get("join") else None, **options)
     if name in ("tree", "star", "governed"):
         root = _node(d["root"], catalog, graphs)
-        children = [_part(child, catalog, graphs) for child in _several(d.get("children", ()))]
+        children = [_part(child, catalog, graphs) for child in _several(_listed(d, "children"))]
         if name == "governed":
             return Governed(root, *children, operator=_node(d["operator"], catalog, graphs), max_rounds=d["max_rounds"], **options)
         return (Tree if name == "tree" else Star)(root, *children, max_rounds=d["max_rounds"], **options)
