@@ -457,10 +457,15 @@ def test_an_agent_paused_while_its_model_answers_holds_the_answer_until_resumed(
         release.wait(5)
         return ChatResult(text='the answer')
     agent = AgentNode('a', FakeProvider(slow))
-    seen = []
-    graph = (GraphBuilder().add(agent, stepper('b', 200, seen)).input('task', 'a.task').output('out', 'a.out')
-             .input('b', 'b.x').output('b', 'b.y').compile())   # b keeps the run going while a is paused
     sent = []
+
+    def keep_going(ctx, x):          # keeps the run going while a is paused, until a has sent its answer
+        deadline = time.monotonic() + 30
+        while not sent and time.monotonic() < deadline and ctx.checkpoint():
+            time.sleep(0.01)
+        return x
+    graph = (GraphBuilder().add(agent, FunctionNode('b', keep_going, inputs=[Port('x')], outputs=[Port('y')], context=True))
+             .input('task', 'a.task').output('out', 'a.out').input('b', 'b.x').output('b', 'b.y').compile())
     engine = Engine(graph, workers=2,
                     observe=lambda event: sent.append(event) if event.get('event') == 'emitted' and event.get('node') == 'a' else None)
     thread, box = in_background(engine, {'task': 'go', 'b': 1})
@@ -470,7 +475,7 @@ def test_an_agent_paused_while_its_model_answers_holds_the_answer_until_resumed(
     time.sleep(0.2)
     assert not sent                  # the answer is held at the step
     engine.control('a', 'resume')
-    thread.join(10)
+    thread.join(40)
     assert box['result'].outputs['out'] == ['the answer'] and not box['result'].held
 
 
