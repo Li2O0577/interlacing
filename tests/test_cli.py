@@ -156,12 +156,15 @@ def test_a_module_beside_where_the_command_is_run_can_be_allowed(tmp_path, monke
 
 
 def test_a_reader_that_goes_away_is_not_an_error(tmp_path):
+    import os
     write(tmp_path / 'g.json', {'method': 'chain', 'nodes': [{'id': 'u', 'kind': 'function', 'function': f'{HERE}.shout'}]})
-    done = subprocess.run(f'{sys.executable} -c "import sys; from interlacing.cli import main; sys.exit(main())" '
-                          f'check {tmp_path / "g.json"} --allow {HERE} | true',
-                          shell=True, capture_output=True, text=True, cwd=str(tmp_path), env={**__import__('os').environ,
-                          'PYTHONPATH': __import__('os').path.dirname(__file__)})
-    assert done.stderr == ''
+    child = subprocess.Popen([sys.executable, '-c', 'import sys; from interlacing.cli import main; sys.exit(main())',
+                              'check', str(tmp_path / 'g.json'), '--allow', HERE],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(tmp_path),
+                             env={**os.environ, 'PYTHONPATH': os.path.dirname(os.path.abspath(__file__))})
+    child.stdout.close()                      # the reader is gone before anything is written
+    error = child.stderr.read().decode()
+    assert child.wait(60) == 0 and error == ''
 
 
 def shout(text):

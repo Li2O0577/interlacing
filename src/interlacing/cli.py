@@ -30,6 +30,7 @@ status says how a run stands: 0 done, 1 failed or refused, 3 waiting for a perso
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import sys
 import threading
@@ -226,7 +227,9 @@ def main(argv=None, out=None) -> int:
         json.dump(state, out, ensure_ascii=encoding != "utf8", indent=2)     # a console that is not UTF-8 gets escapes
         out.write("\n")
         out.flush()
-    except BrokenPipeError:                   # the reader went away (| head): what it did not read is not an error
+    except OSError as exc:                    # the reader went away (| head): what it did not read is not an error
+        if not isinstance(exc, BrokenPipeError) and not (sys.platform == "win32" and exc.errno == errno.EINVAL):
+            raise                             # Windows says EINVAL for a pipe with no reader; anything else is real
         if out is sys.stdout:                 # and Python's own flush at exit must not fail on it either
             os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
     return code
