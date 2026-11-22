@@ -261,7 +261,7 @@ Who can flip a switch:
 
 Every switch change goes into the journal, stays as it was after resuming, and watchers receive a `control` event. Time spent paused does not count against an activation's time limit. A paused node cannot be called (`call`).
 
-When all the remaining work is paused, the run does not hang: nodes waiting at a pause put their inputs back, the run ends as "not finished", `Result.held` lists the nodes whose switches are not on, and the run directory's status shows `held` and `switches`. Switch them back on and `resume` to continue; it is the same idea as a run stopping first while a human in the graph has not answered yet.
+When all the remaining work is paused, the run does not hang: nodes waiting at a pause put their inputs back, the run ends as "not finished", `Result.held` lists the nodes whose switches are not on, and the run directory's status shows `held` and `switches`. Nodes waiting on them (a lead waiting for a member's reply, say) end with the run too and are not started again within it, so the model is not asked again and again, and no one wraps up early for want of an answer. Switch them back on and `resume` to continue; it is the same idea as a run stopping first while a human in the graph has not answered yet.
 
 ### Receiving messages in the middle of an activation
 
@@ -617,13 +617,13 @@ A description holds only names, and building the graph turns names into real thi
 
 `catalog.register(kind, loader)` adds your own kinds of node.
 
-`allow` lets through only functions **defined** in an allowed module: `mypkg.os.system`, reaching through an allowed module into a module it imported, is refused, and so is a function imported from elsewhere (a function wrapped by `@node` counts as the function it wraps). Graphs written by a model and graphs sent by an MCP client are held to this too.
+`allow` lets through only functions **defined** in an allowed module (a class, or an object with `__call__`, counts where its class was defined): `mypkg.os.system`, reaching through an allowed module into a module it imported, is refused, and so is a function imported from elsewhere (a function wrapped by `@node` counts as the function it wraps). Graphs written by a model and graphs sent by an MCP client are held to this too.
 
 ### The format, briefly: `GUIDE` and `functions`
 
 `interlacing.spec.GUIDE` is the graph format on one page, written for a person or a model writing a graph for the first time; `functions(catalog)` lists the functions a catalog allows, each with its signature and the first line of its documentation; `guide(catalog)` is both together. The MCP server has a `guide` tool of the same content, the command line has `interlacing guide --allow mypkg`, and `SpawnNode.tool()` carries it in its description.
 
-What is most often written wrong is in `GUIDE`: an edge is `{"from": "a.out", "to": "b.text"}`; a method's graph input is `in` and its output `out`; a fan's output is the list of its branches' outputs; a node of a method may itself be a method. A part written in the wrong shape is answered with the right shape; a wrong port or graph input is answered with the ones there are.
+`GUIDE` also lists the ports of the common kinds of node (`human` is `request` to `answer`, `branch` is `x` to `yes`/`no`, and so on), and a test checks it against the real ports. What is most often written wrong is in `GUIDE`: an edge is `{"from": "a.out", "to": "b.text"}`; a method's graph input is `in` and its output `out`; a fan's output is the list of its branches' outputs; a node of a method may itself be a method. A part written in the wrong shape is answered with the right shape; a wrong port or graph input is answered with the ones there are.
 
 ### Writing only what differs
 
@@ -687,8 +687,8 @@ Installing gives the command `interlacing` (or use `python -m interlacing.cli`).
 | `guide [--allow module]...` | Print the graph format and the functions these modules let a graph name (this one prints text, not JSON) |
 | `check graph.json` | Build the graph without running it, and print the digest, nodes, inputs and outputs; needs no keys |
 | `run graph.json --dir RUN` | Start a run in a new directory; `--input name=value` (the value is read as JSON, or as text if that fails) or `--inputs file`; `--time-limit seconds` is the time limit per activation; `--budget name=number` (repeatable) is the usage limit for the whole run, for example `--budget tokens=200000`; `--workspace dir` is the nodes' working directory, by default `files/` in the run directory |
-| `resume --dir RUN` | Continue from the journal: after a human answered, after a failure was fixed, after an interruption; `--budget name=number` continues with a larger budget |
-| `answer --dir RUN [question] --json value` or `--text text` | Answer a question put to a human in the graph; with only one open question, its name can be left out |
+| `resume --dir RUN` | Keeps the bounds the run was started with (`--allow` and the rest are not given again) and continues from the journal: after a human answered, after a failure was fixed, after an interruption; `--budget name=number` continues with a larger budget |
+| `answer --dir RUN [question] --json value` or `--text text` | Answer a question put to a human in the graph; with only one open question, its name can be left out. The run still waits afterwards; `next` in the output says to `resume` it |
 | `status --dir RUN` | Print the run's status and open questions |
 | `files --dir RUN` | List the files in the workspace, and which node wrote each one in which activation |
 | `control ACTION NODE... --dir RUN [--team]` | Pause, resume, stop or restart nodes, see "A switch on every node, and who manages whom"; when the run is not going on, it goes into the journal and takes effect at the next `resume` |

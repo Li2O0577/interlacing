@@ -497,3 +497,44 @@ def test_an_agent_stopped_while_its_model_answers_does_not_send_the_answer(tmp_p
     release.set()
     thread.join(10)
     assert box['result'].outputs == {'out': []} and box['result'].held == {'a': 'stopped'}
+
+
+def test_a_lead_waiting_on_a_paused_member_is_not_asked_again_while_the_run_ends(tmp_path):
+    from interlacing import AgentNode
+    from interlacing.models import ChatResult, FakeProvider
+    asked, release, lead_calls = threading.Event(), threading.Event(), []
+
+    def member_model(system, messages, tools):
+        asked.set()
+        release.wait(5)
+        return ChatResult(text='350')
+
+    def member(id):
+        return AgentNode(id, FakeProvider(member_model))
+
+    def lead_model(system, messages, tools):
+        lead_calls.append(1)
+        said = next((m['content'] for m in reversed(messages) if m['role'] == 'tool'), '')
+        if not any(m['role'] == 'tool' for m in messages):
+            return ChatResult(tool_calls=[{'id': 'h', 'name': 'hire', 'args': {'template': 'm', 'name': 'a', 'task': 'go'}},
+                                          {'id': 'w', 'name': 'wait', 'args': {}}])
+        if '[from_a]' in said:
+            return ChatResult(tool_calls=[{'id': 's', 'name': 'send_out', 'args': {'content': said.split('\n')[1]}},
+                                          {'id': 'f', 'name': 'finish', 'args': {}}])
+        return ChatResult(tool_calls=[{'id': f'w{len(lead_calls)}', 'name': 'wait', 'args': {}}])
+
+    def build():
+        lead = AgentNode('lead', FakeProvider(lead_model), resident=True, hire=1, templates={'m': member})
+        return GraphBuilder().add(lead).input('in', 'lead.task').output('out', 'lead.out').compile()
+    path = tmp_path / 'j.jsonl'
+    engine = Engine(build(), journal=Journal(path), workers=2)
+    thread, box = in_background(engine, {'in': 'go'})
+    until(asked.is_set)
+    engine.control('lead-a', 'pause')
+    release.set()
+    thread.join(10)
+    assert not thread.is_alive() and 'result' in box, box.get('error')
+    assert box['result'].held == {'lead-a': 'paused'} and not box['result'].complete
+    assert len(lead_calls) == 1                     # parked, the lead was not taken up again and again in this run
+    Journal(path).write({'kind': 'control', 'nodes': ['lead-a'], 'action': 'resume'})
+    assert Engine(build(), journal=Journal(path)).resume().last('out') == '350'

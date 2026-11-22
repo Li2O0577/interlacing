@@ -277,3 +277,19 @@ def test_a_wrong_port_or_input_is_answered_with_the_ones_there_are():
     graph = load({'method': 'chain', 'nodes': [{'id': 'a', 'kind': 'function', 'function': f'{__name__}.words'}]}, catalog)
     with pytest.raises(Exception, match=r"no input \['text'\]; its inputs are \['in'\]"):
         Engine(graph).run({'text': 'x'})
+
+
+class _Doubler:
+    def __call__(self, x):
+        return x * 2
+
+
+doubler = _Doubler()
+borrowed_partial = __import__('functools').partial(__import__('os').getcwd)
+
+
+def test_an_object_with_call_counts_where_its_class_was_defined():
+    catalog = Catalog(allow=[__name__])
+    assert catalog.function(f'{__name__}.doubler')(4) == 8
+    with pytest.raises(SpecError, match='defined in posix|defined in nt'):
+        catalog.function(f'{__name__}.borrowed_partial')

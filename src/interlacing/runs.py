@@ -432,7 +432,7 @@ class Run:
         elif question not in {q["id"] for q in waiting}:
             raise SpecError(f"no open question {question!r}")
         _write(self.directory / "answers" / f"{question}.json", {"answer": answer})
-        return self.status()
+        return {**self.status(), "answered": question, "next": "resume the run to carry on with the answer"}
 
     # ---- state -----------------------------------------------------------------------------------------
 

@@ -33,6 +33,15 @@ A node is a mapping with an id and a kind:
      "inputs": ["text"], "outputs": ["out"]. A first parameter named ctx is the run's context, not an input.
    {"id": "lead", "kind": "agent", "model": "...", "system": "You are ..."}   inputs ["task"], output "out"
    {"id": "sub", "kind": "graph", "graph": {...}}                            a whole graph used as one node
+Other kinds, with their ports (inputs -> outputs, "-" for none):
+   human    request -> answer      a person's answer; the run waits for it (answer, then resume)
+   branch   x -> yes, no           "condition": "mod.f"; x leaves by yes when f(x) is true, else by no
+   until    x -> done, again       "condition": "mod.f"; the gate of a loop written by hand
+   pass     x -> y                 hands x on
+   collect  parts -> y             waits for every edge into parts; y is their list, in the edges' order
+   spawn    request -> result      runs a graph it is sent as {"graph": ..., "inputs": ...}
+   source   - -> out               "read": "mod.f"; each item f returns goes out, one by one
+   sink     x -> -                 "write": "mod.f"; f is called with x
 Ports are names ("text") or mappings ({"name": "text", "schema": {"type": "string"}}).
 "defaults": {"agent": {"model": "..."}} at the top gives settings to every node of that kind.
 "times": 3 on a node makes three copies, "<id>-1" .. "<id>-3".

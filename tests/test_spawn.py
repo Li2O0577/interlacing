@@ -223,3 +223,18 @@ def test_the_guide_lists_only_what_the_catalog_lets_a_graph_name():
     assert not any(name.endswith(('.json', '.pytest', '.Catalog')) for name in listed)     # imported, not defined here
     assert 'Allowed functions: none.' in guide(Catalog()) and 'Allowed functions: none.' in guide()
     assert functions(Catalog(allow=['no_such_module_anywhere'])) == []
+
+
+def test_the_ports_the_guide_gives_each_kind_are_its_ports():
+    from interlacing.spec import GUIDE, load_node
+    catalog = Catalog(allow=[HERE])
+    settings = {'branch': {'condition': f'{HERE}.add_one'}, 'until': {'condition': f'{HERE}.add_one'},
+                'source': {'read': f'{HERE}.add_one'}, 'sink': {'write': f'{HERE}.add_one'}}
+    table = GUIDE.split('Other kinds')[1].split('\n')[1:]
+    rows = [line.split(None, 1) for line in table[:table.index(next(l for l in table if not l.startswith('   ')))]]
+    assert {kind for kind, _ in rows} == {'human', 'branch', 'until', 'pass', 'collect', 'spawn', 'source', 'sink'}
+    for kind, rest in rows:
+        inputs, outputs = (side.strip() for side in rest.split('  ')[0].split('->'))
+        node = load_node({'id': 'n', 'kind': kind, **settings.get(kind, {})}, catalog)
+        assert list(node.inputs) == ([] if inputs == '-' else inputs.split(', ')), kind
+        assert list(node.outputs) == ([] if outputs == '-' else outputs.split(', ')), kind

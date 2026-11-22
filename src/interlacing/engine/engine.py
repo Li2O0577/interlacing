@@ -1331,7 +1331,11 @@ class Engine:
                         state.node.reset()
                     elif ctx._saved:
                         state.resuming = True       # switched on again, it goes on from what it saved
-                    sched.consider(state)
+                    if halt != "park" or state.status != ACTIVE:
+                        sched.consider(state)
+                    # parked while switched on: it was waiting on nodes that are paused, and the run is ending to
+                    # be taken up later. Started again now it would only wait, be parked and start again, for ever;
+                    # it starts again when something reaches it, or when the run is taken up.
                 else:
                     sched.stopped = True
                 lock.notify_all()

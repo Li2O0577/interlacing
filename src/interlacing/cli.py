@@ -88,7 +88,10 @@ def _beside(path: str) -> Path:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="interlacing", description="Check and run graphs written as data.")
+    parser = argparse.ArgumentParser(
+        prog="interlacing", description="Check and run graphs written as data. Start with: interlacing guide --allow MODULE",
+        epilog="run and resume exit with 0 when the run is done, 1 when it failed or was refused, 3 when it waits for a "
+               "person (answer, then resume), 4 when it stopped.")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -119,7 +122,9 @@ def _parser() -> argparse.ArgumentParser:
     budget: dict = dict(action="append", default=[], metavar="NAME=NUMBER", type=_limit,
                   help="the most the run may use of something its nodes report using, such as tokens=200000")
     run.add_argument("--budget", **budget)
-    resume = commands.add_parser("resume", help="carry on a run that stopped, failed or was waiting")
+    resume = commands.add_parser("resume", help="carry on a run that stopped, failed or was waiting",
+                                 description="Carry on a run. It keeps what the run was started with: the modules it may "
+                                             "use (--allow), --processes and the rest are not given again.")
     resume.add_argument("--dir", required=True)
     resume.add_argument("--budget", **budget)
     commands.add_parser("status", help="say where a run stands").add_argument("--dir", required=True)
@@ -191,6 +196,8 @@ def main(argv=None, out=None) -> int:
         if args.command == "guide":
             from .spec import Catalog, guide
             out.write(guide(Catalog(allow=args.allow)))
+            if not args.allow:
+                out.write("Name the modules a graph may take functions from with --allow MODULE, here and on check and run.\n")
             return 0
         if args.command == "check":
             state, code = check(_description(args.graph), allow=args.allow, processes=args.processes, files=_beside(args.graph), tools=args.tools, apps=args.apps,

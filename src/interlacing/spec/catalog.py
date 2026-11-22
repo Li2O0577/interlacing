@@ -221,7 +221,8 @@ class Catalog:
 
 def _homes(found: Any) -> list[str]:
     """The modules a callable comes from: where a function or class was defined; for an object made callable
-    (a function made into a node with ``@node``, a wrapper), where the function it stands for was defined."""
+    (a function made into a node with ``@node``, a wrapper), where the function it stands for was defined, or
+    else where its class was."""
     if inspect.isfunction(found) or inspect.isclass(found) or inspect.isbuiltin(found) or inspect.ismethod(found):
         home = getattr(found, "__module__", None)
         return [home] if isinstance(home, str) else []
@@ -229,4 +230,7 @@ def _homes(found: Any) -> list[str]:
     for inner in (getattr(found, "__wrapped__", None), getattr(found, "function", None), getattr(found, "func", None)):
         if inner is not None and inner is not found and callable(inner):
             homes.extend(_homes(inner))
+    if not homes and callable(found):        # an object of a class with __call__: where that class was defined
+        home = getattr(type(found), "__module__", None)
+        homes = [home] if isinstance(home, str) else []
     return homes
