@@ -261,7 +261,7 @@ Who can flip a switch:
 
 Every switch change goes into the journal, stays as it was after resuming, and watchers receive a `control` event. Time spent paused does not count against an activation's time limit. A paused node cannot be called (`call`).
 
-When all the remaining work is paused, the run does not hang: nodes waiting at a pause put their inputs back, the run ends as "not finished", `Result.held` lists the nodes whose switches are not on, and the run directory's status shows `held` and `switches`. Switch them back on and `resume` to continue; it is the same idea as a run stopping first while a human in the graph has not answered yet.
+When all the remaining work is paused, the run does not hang: nodes waiting at a pause put their inputs back, the run ends as "not finished", `Result.held` lists the nodes whose switches are not on, and the run directory's status shows `held` and `switches`. Nodes waiting on them (a lead waiting for a member's reply, say) end with the run too and are not started again within it, so the model is not asked again and again, and no one wraps up early for want of an answer. Switch them back on and `resume` to continue; it is the same idea as a run stopping first while a human in the graph has not answered yet.
 
 ### Receiving messages in the middle of an activation
 
@@ -405,7 +405,7 @@ lead = AgentNode("lead", model, resident=True, hire=3, templates={"researcher": 
 | `fail(reason)` | Decide the work cannot be done and make the whole run fail with this reason |
 
 - **Separate directories:** with a workspace, a member hired from a description gets a directory under its hirer's (`lead/lead-r1/`); it can write only its own directory and the shared ones, and its hirer can read it.
-- **What is underneath:** all of this is `ctx.change`: checked first, then applied, journaled, and redone when a run is resumed (run directories provide `rebuild` automatically). There are two new `Change` operations: `ports(node, inputs=, outputs=)`, which gives an existing node more ports during the run (added ports are not type-checked; the node learns of them through `Node.add_ports`), and `manage(manager, members...)`. When a whole change is refused, the added ports are taken back too.
+- **What is underneath:** all of this is `ctx.change`: checked first, then applied, journaled, and redone when a run is resumed. A member remembers who hired it from which template (`made_by` in its description), and on resume the agent that hired it makes it again from the same template, so `Engine(..., journal=...)` in Python needs no `rebuild` either. There are two new `Change` operations: `ports(node, inputs=, outputs=)`, which gives an existing node more ports during the run (added ports are not type-checked; the node learns of them through `Node.add_ports`), and `manage(manager, members...)`. When a whole change is refused, the added ports are taken back too.
 - **Member failures:** an agent that may hire takes over its members' failures (see "Member failures go to the manager" under the node switches). In `wait` it sees a `[failed]` line with who failed, in which round and with what error, and it can restart the member with `control`, dismiss it with `dismiss`, or give up with `fail`.
 - **Still only along wired edges:** hiring only adds nodes and edges; there is no "send a message to someone by name".
 
@@ -498,7 +498,7 @@ def plan(ctx, task):
 - Once applied, the result is checked with all the rules for building a graph. If it fails, `ctx.change` raises `GraphError` and the graph does not change at all, so the node can catch it and try another way; if it passes it takes effect at once: new nodes start running by their own firing rules, new edges start delivering, and envelopes still waiting on removed edges are dropped, with the count reported to watchers.
 - A node cannot remove itself or a node that is running. `Engine(max_nodes=N)` caps how large a graph can grow.
 - Watchers receive `changed` (`node`, `round`, `added`, `removed`, `dropped`, `graph` with the new digest); `Engine.graph` is the current graph, and `Result` holds the new nodes' rounds and the new graph outputs.
-- With a journal, the change is written as plain data together with the activation that proposed it, and on resume it is redone in the original order, so a grown graph is still there after resuming. The journal stores a new node's description, which has to be turned back into a node on resume: `Engine(..., rebuild=function)`, for example `lambda d: load_node(d, Catalog(allow=[...]))`; run directories (`Run`, the command line, the MCP server) do this automatically using the graph file's directory. Without `rebuild`, a run with a journal cannot add nodes. Blocks and `GraphNode` cannot be added this way, because their descriptions do not contain the graph inside.
+- With a journal, the change is written as plain data together with the activation that proposed it, and on resume it is redone in the original order, so a grown graph is still there after resuming. The journal stores a new node's description, which has to be turned back into a node on resume: `Engine(..., rebuild=function)`, for example `lambda d: load_node(d, Catalog(allow=[...]))`; run directories (`Run`, the command line, the MCP server) do this automatically using the graph file's directory. Without `rebuild`, a run with a journal can add only members an agent hires (the agent makes them again from its templates), and no other nodes. Blocks and `GraphNode` cannot be added this way, because their descriptions do not contain the graph inside.
 
 The difference: `ctx.change` changes this graph, and new nodes stay like any other node, can be found again and again, and can be wired to existing nodes; a graph run by `SpawnNode` lives for one activation only.
 
@@ -522,6 +522,13 @@ What the new graph can reach is decided by the `Catalog` given when this node wa
 | `max_nodes` | The most nodes one graph may have, counting those in blocks | 50 |
 | `depth` | How many more levels of `SpawnNode` the new graph may nest | 0, not allowed |
 | `max_runs` | The most graphs run in one outer run | Unlimited |
+
+To give it to an agent as a tool, use `grow.tool()`: the description of the `Tool` it returns already holds the graph format (`GUIDE`) and the functions this node's catalog allows, with their signatures, so the model needs no other prompt to write a graph:
+
+```python
+agent = AgentNode("designer", model, tools=[grow.tool()])
+graph = GraphBuilder().add(agent, grow).connect("designer.grow", "grow.request", "call")...
+```
 
 When the description cannot be built, a limit is exceeded or the new graph fails, by default `{"error": ...}` is sent back as the result, so the sender can try writing it another way; an agent sees the reason in the tool's answer. With `strict=True` the node fails instead, and the whole run with it.
 
@@ -610,6 +617,14 @@ A description holds only names, and building the graph turns names into real thi
 
 `catalog.register(kind, loader)` adds your own kinds of node.
 
+`allow` lets through only functions **defined** in an allowed module (a class, or an object with `__call__`, counts where its class was defined): `mypkg.os.system`, reaching through an allowed module into a module it imported, is refused, and so is a function imported from elsewhere (a function wrapped by `@node` counts as the function it wraps). Graphs written by a model and graphs sent by an MCP client are held to this too.
+
+### The format, briefly: `GUIDE` and `functions`
+
+`interlacing.spec.GUIDE` is the graph format on one page, written for a person or a model writing a graph for the first time; `functions(catalog)` lists the functions a catalog allows, each with its signature and the first line of its documentation; `guide(catalog)` is both together. The MCP server has a `guide` tool of the same content, the command line has `interlacing guide --allow mypkg`, and `SpawnNode.tool()` carries it in its description.
+
+`GUIDE` also lists the ports of the common kinds of node (`human` is `request` to `answer`, `branch` is `x` to `yes`/`no`, and so on), and a test checks it against the real ports. What is most often written wrong is in `GUIDE`: an edge is `{"from": "a.out", "to": "b.text"}`; a method's graph input is `in` and its output `out`; a fan's output is the list of its branches' outputs; a node of a method may itself be a method. A part written in the wrong shape is answered with the right shape; a wrong port or graph input is answered with the ones there are.
+
 ### Writing only what differs
 
 When building your own framework, a graph file needs only the structure and the few settings where you do not want the defaults.
@@ -646,7 +661,20 @@ Written by hand it can be shorter: node settings go right next to `id` and `kind
 ```json
 {"method": "loop", "max_rounds": 4, "until": "mypkg.checks.good_enough", "nodes": [
   {"id": "draft", "kind": "agent", "model": "anthropic:some-model", "system": "..."},
-  {"id": "tidy", "kind": "function", "function": "mypkg.steps.tidy", "inputs": ["x"], "outputs": ["y"]}
+  {"id": "tidy", "kind": "function", "function": "mypkg.steps.tidy"}
+]}
+```
+
+A function node reads its ports from the function, as in Python: each parameter is an input, the output is `out`, and a first parameter called `ctx` is the context, not an input. Write `inputs`, `outputs` (or `"context": true/false`) only to rename them or add checks.
+
+A node of a method may be written as another method; it becomes a node holding that graph, named by its `id`, or else by the method (`fan`, `fan_2`...). It is the same as `{"kind": "graph", "graph": {...}}`:
+
+```json
+{"method": "chain", "nodes": [
+  {"id": "clean", "kind": "function", "function": "mypkg.steps.clean"},
+  {"method": "fan", "nodes": [{"id": "count", "kind": "function", "function": "mypkg.steps.count"},
+                              {"id": "top", "kind": "function", "function": "mypkg.steps.top"}]},
+  {"id": "report", "kind": "function", "function": "mypkg.steps.report"}
 ]}
 ```
 
@@ -656,14 +684,17 @@ Installing gives the command `interlacing` (or use `python -m interlacing.cli`).
 
 | Command | Purpose |
 |---|---|
+| `guide [--allow module]...` | Print the graph format and the functions these modules let a graph name (this one prints text, not JSON) |
 | `check graph.json` | Build the graph without running it, and print the digest, nodes, inputs and outputs; needs no keys |
 | `run graph.json --dir RUN` | Start a run in a new directory; `--input name=value` (the value is read as JSON, or as text if that fails) or `--inputs file`; `--time-limit seconds` is the time limit per activation; `--budget name=number` (repeatable) is the usage limit for the whole run, for example `--budget tokens=200000`; `--workspace dir` is the nodes' working directory, by default `files/` in the run directory |
-| `resume --dir RUN` | Continue from the journal: after a human answered, after a failure was fixed, after an interruption; `--budget name=number` continues with a larger budget |
-| `answer --dir RUN [question] --json value` or `--text text` | Answer a question put to a human in the graph; with only one open question, its name can be left out |
+| `resume --dir RUN` | Keeps the bounds the run was started with (`--allow` and the rest are not given again) and continues from the journal: after a human answered, after a failure was fixed, after an interruption; `--budget name=number` continues with a larger budget |
+| `answer --dir RUN [question] --json value` or `--text text` | Answer a question put to a human in the graph; with only one open question, its name can be left out. The run still waits afterwards; `next` in the output says to `resume` it |
 | `status --dir RUN` | Print the run's status and open questions |
 | `files --dir RUN` | List the files in the workspace, and which node wrote each one in which activation |
 | `control ACTION NODE... --dir RUN [--team]` | Pause, resume, stop or restart nodes, see "A switch on every node, and who manages whom"; when the run is not going on, it goes into the journal and takes effect at the next `resume` |
 | `node-serve module:name` | Serve one node in this process for a `RemoteNode` elsewhere; `--listen host:port`, `--token-env VAR`, `--make`, see "Nodes in another process or on another machine" |
+
+The directory the command is run in is put on the module search path (as `python -m` does), so a `steps.py` beside it can be named with `--allow steps`. Output closed early (`| head`) is not an error.
 
 `check` and `run` use `--allow module` (repeatable), `--processes`, `--tools tool_pool_dir`, `--apps app_dir` and `--remote address` to set what the graph can reach, with the same meaning as in `Catalog`; without them nothing can be reached. The bounds are written into the run directory at `run`, and `resume` keeps them. `--workers N` is the number of threads running nodes in parallel.
 
@@ -704,6 +735,7 @@ In Python, `interlacing.runs.Run` does the same: `Run.create(dir, description, a
 
 | Tool | Arguments | Purpose |
 |---|---|---|
+| `guide` | none | The graph format, and the functions this server lets a graph name (with signatures); a client reads it before writing a graph |
 | `check` | `graph` | Build the graph without running it; returns the digest, nodes, inputs and outputs |
 | `start` | `graph`, `inputs`, `wait` | Start a run and return its name and status. With `wait: false` it returns `running` at once and the run goes on in the server |
 | `status` | `run` | The run's status and open questions |

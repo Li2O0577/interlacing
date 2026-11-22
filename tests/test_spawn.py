@@ -193,3 +193,48 @@ def test_a_graph_that_is_not_trusted_cannot_give_itself_more_time_or_threads(tmp
                          'inputs': {'ask': 'deep.request', 'x': 'b.in'}})
     deep, block = built.node('deep'), built.node('b')
     assert (deep.max_nodes, deep.workers, deep.depth, block.workers) == (6, 2, 0, 2)
+
+
+def test_a_spawn_node_as_a_tool_carries_the_format_and_what_it_may_name():
+    from interlacing.spec import GUIDE
+    grow = SpawnNode('grow', Catalog(allow=[HERE]), max_nodes=7)
+    tool = grow.tool()
+    assert tool.name == 'grow' and GUIDE in tool.description and 'At most 7 nodes' in tool.description
+    assert f'{HERE}.add_one(x)' in tool.description and f'{HERE}.node(' not in tool.description.replace(f'{HERE}.node(id', '')
+    assert tool.parameters['required'] == ['graph', 'inputs']
+
+    def policy(system, messages, tools):
+        if not any(m['role'] == 'tool' for m in messages):
+            return ChatResult(tool_calls=[{'id': 'c1', 'name': 'grow', 'args': {
+                'graph': {'method': 'chain', 'nodes': [{'id': 'a', 'kind': 'function', 'function': f'{HERE}.add_one'},
+                                                       {'id': 'b', 'kind': 'function', 'function': f'{HERE}.double'}]},
+                'inputs': {'in': 4}}}])
+        return ChatResult(text=messages[-1]['content'])
+    agent = AgentNode('designer', FakeProvider(policy), tools=[tool])
+    graph = (GraphBuilder().add(agent, grow).connect('designer.grow', 'grow.request', 'call')
+             .input('task', 'designer.task').output('out', 'designer.out').compile())
+    assert json.loads(Engine(graph).run({'task': 'go'}).last('out'))['outputs'] == {'out': [10]}
+
+
+def test_the_guide_lists_only_what_the_catalog_lets_a_graph_name():
+    from interlacing.spec import functions, guide
+    listed = {f['name']: f for f in functions(Catalog(allow=[HERE]))}
+    assert f'{HERE}.add_one' in listed and listed[f'{HERE}.add_one']['signature'] == '(x)'
+    assert not any(name.endswith(('.json', '.pytest', '.Catalog')) for name in listed)     # imported, not defined here
+    assert 'Allowed functions: none.' in guide(Catalog()) and 'Allowed functions: none.' in guide()
+    assert functions(Catalog(allow=['no_such_module_anywhere'])) == []
+
+
+def test_the_ports_the_guide_gives_each_kind_are_its_ports():
+    from interlacing.spec import GUIDE, load_node
+    catalog = Catalog(allow=[HERE])
+    settings = {'branch': {'condition': f'{HERE}.add_one'}, 'until': {'condition': f'{HERE}.add_one'},
+                'source': {'read': f'{HERE}.add_one'}, 'sink': {'write': f'{HERE}.add_one'}}
+    table = GUIDE.split('Other kinds')[1].split('\n')[1:]
+    rows = [line.split(None, 1) for line in table[:table.index(next(l for l in table if not l.startswith('   ')))]]
+    assert {kind for kind, _ in rows} == {'human', 'branch', 'until', 'pass', 'collect', 'spawn', 'source', 'sink'}
+    for kind, rest in rows:
+        inputs, outputs = (side.strip() for side in rest.split('  ')[0].split('->'))
+        node = load_node({'id': 'n', 'kind': kind, **settings.get(kind, {})}, catalog)
+        assert list(node.inputs) == ([] if inputs == '-' else inputs.split(', ')), kind
+        assert list(node.outputs) == ([] if outputs == '-' else outputs.split(', ')), kind

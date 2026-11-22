@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import inspect
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -82,7 +83,7 @@ class Catalog:
         if not isinstance(name, str) or not name or "<" in name:
             raise SpecError(f"{name!r} cannot be found by name: it must be a function defined at the top of a module")
         parts = name.split(".")
-        if not any(name == prefix or name.startswith(prefix + ".") for prefix in self.allow):
+        if not self.allows(name):
             raise SpecError(f"{name} is not in a module this catalog allows ({', '.join(self.allow) or 'none'})")
         for cut in range(len(parts) - 1, 0, -1):
             try:
@@ -91,13 +92,27 @@ class Catalog:
                 continue
             try:
                 for part in parts[cut:]:
+                    if part.startswith("__"):
+                        raise SpecError(f"{name}: {part} is not a function a graph may name")
                     found = getattr(found, part)
+                    if inspect.ismodule(found):
+                        # mymod.os.system: a module that an allowed module imported is not itself allowed
+                        raise SpecError(f"{name} reaches into the module {found.__name__}, which is not one a graph "
+                                        f"may name through {'.'.join(parts[:cut])}")
             except AttributeError:
                 break
             if not callable(found):
                 raise SpecError(f"{name} is not callable")
+            homes = _homes(found)
+            if not any(self.allows(home) for home in homes):
+                raise SpecError(f"{name} is defined in {homes[0] if homes else 'no module'}, not in a module this "
+                                f"catalog allows ({', '.join(self.allow) or 'none'})")
             return found
         raise SpecError(f"{name} cannot be found")
+
+    def allows(self, name: str) -> bool:
+        """Whether the dotted name is an allowed module or lies inside one."""
+        return any(name == prefix or name.startswith(prefix + ".") for prefix in self.allow)
 
     def with_defaults(self, defaults: Mapping[str, Mapping]) -> "Catalog":
         """This catalog with more defaults on top of its own."""
@@ -202,3 +217,20 @@ class Catalog:
         if self.models is None:
             raise SpecError(f"this catalog has no models, so the agent's model {name!r} cannot be built")
         return self.models(name)
+
+
+def _homes(found: Any) -> list[str]:
+    """The modules a callable comes from: where a function or class was defined; for an object made callable
+    (a function made into a node with ``@node``, a wrapper), where the function it stands for was defined, or
+    else where its class was."""
+    if inspect.isfunction(found) or inspect.isclass(found) or inspect.isbuiltin(found) or inspect.ismethod(found):
+        home = getattr(found, "__module__", None)
+        return [home] if isinstance(home, str) else []
+    homes = []
+    for inner in (getattr(found, "__wrapped__", None), getattr(found, "function", None), getattr(found, "func", None)):
+        if inner is not None and inner is not found and callable(inner):
+            homes.extend(_homes(inner))
+    if not homes and callable(found):        # an object of a class with __call__: where that class was defined
+        home = getattr(type(found), "__module__", None)
+        homes = [home] if isinstance(home, str) else []
+    return homes

@@ -59,6 +59,20 @@ class SpawnNode(Node):
         return {"max_nodes": self.max_nodes, "depth": self.depth, "max_runs": self.max_runs, "workers": self.workers,
                 "strict": self.strict}
 
+    def tool(self, name: str = "grow", description: str | None = None):
+        """This node as a tool for an agent, joined to it by a call edge (``agent.<name>`` to ``<id>.request``):
+        its description holds the graph format and the functions this node's catalog allows, so the model
+        needs to be told nothing else to write a graph."""
+        from ..nodes import Tool
+        from .guide import guide
+        told = description or (f"Build a graph described as JSON and run it; you get its outputs back, or an error "
+                               f"saying what to fix. At most {self.max_nodes} nodes.")
+        return Tool(name, f"{told}\n\n{guide(self.catalog)}", {
+            "type": "object", "properties": {
+                "graph": {"type": "object", "description": "The graph, written as the format above says."},
+                "inputs": {"type": "object", "description": 'A value for each input of the graph, e.g. {"in": ...}.'}},
+            "required": ["graph", "inputs"]})
+
     def build(self, description: Any) -> Graph:
         """The graph a description stands for, within this node's limits."""
         if not isinstance(description, Mapping):

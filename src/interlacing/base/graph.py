@@ -281,7 +281,8 @@ class GraphBuilder:
         port = getattr(node, side).get(end.port)
         if port is None:
             kind = "output" if side == "outputs" else "input"
-            raise GraphError(f"{where if isinstance(where, str) else 'edge ' + where.id}: {end.node} has no {kind} port {end.port!r}")
+            raise GraphError(f"{where if isinstance(where, str) else 'edge ' + where.id}: {end.node} has no {kind} port {end.port!r}; "
+                             f"its {kind}s are {sorted(getattr(node, side)) or 'none'}")
         return port
 
     @staticmethod

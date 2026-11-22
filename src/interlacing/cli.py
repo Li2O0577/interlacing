@@ -1,5 +1,6 @@
 """The command line.
 
+    interlacing guide  [--allow MODULE]...
     interlacing check  graph.json [--allow MODULE]... [--processes] [--tools DIRECTORY] [--apps DIRECTORY] [--remote ADDRESS]...
     interlacing run    graph.json --dir RUN [--input NAME=VALUE]... [--allow MODULE]... [--processes] [--tools DIRECTORY] [--workers N]
                          [--time-limit SECONDS] [--workspace DIRECTORY] [--apps DIRECTORY] [--remote ADDRESS]...
@@ -12,6 +13,7 @@
                          [--files DIRECTORY] [--tools DIRECTORY] [--apps DIRECTORY] [--remote ADDRESS]...
     interlacing node-serve MODULE:NAME [--listen HOST:PORT] [--make] [--token-env NAME]
 
+``guide`` prints how a graph is written and the functions the modules ``--allow`` names may give it.
 ``--tools`` names a tool pool: a directory of tool files the graph's agents may be given by path. ``--apps``
 names a directory whose folders may be nodes, each an application with a ``node.json``. ``--remote`` names
 an address of a served node the graph may reach. ``node-serve`` serves one node for graphs elsewhere: it
@@ -22,12 +24,13 @@ run that is not being run now; it holds when the run is resumed.
 
 A graph file may take text (a prompt, say) from files in its own directory: ``{"file": "prompts/lead.md"}``.
 
-Every command but ``serve`` prints JSON (``node-serve`` one line, then serves); ``serve`` is the MCP server in ``interlacing.serve``. The exit
+Every command but ``serve`` and ``guide`` prints JSON (``node-serve`` one line, then serves); ``serve`` is the MCP server in ``interlacing.serve``. The exit
 status says how a run stands: 0 done, 1 failed or refused, 3 waiting for a person, 4 stopped.
 """
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import sys
 import threading
@@ -85,7 +88,10 @@ def _beside(path: str) -> Path:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="interlacing", description="Check and run graphs written as data.")
+    parser = argparse.ArgumentParser(
+        prog="interlacing", description="Check and run graphs written as data. Start with: interlacing guide --allow MODULE",
+        epilog="run and resume exit with 0 when the run is done, 1 when it failed or was refused, 3 when it waits for a "
+               "person (answer, then resume), 4 when it stopped.")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -98,6 +104,8 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--remote", action="append", default=[], metavar="ADDRESS",
                              help="tcp://host:port of a served node the graph may reach (repeatable)")
 
+    guide = commands.add_parser("guide", help="say how a graph is written, and which functions it may name")
+    guide.add_argument("--allow", action="append", default=[], metavar="MODULE", help="a module whose functions to list (repeatable)")
     check = commands.add_parser("check", help="build the graph and describe it, without running anything")
     check.add_argument("graph")
     reach(check)
@@ -114,7 +122,9 @@ def _parser() -> argparse.ArgumentParser:
     budget: dict = dict(action="append", default=[], metavar="NAME=NUMBER", type=_limit,
                   help="the most the run may use of something its nodes report using, such as tokens=200000")
     run.add_argument("--budget", **budget)
-    resume = commands.add_parser("resume", help="carry on a run that stopped, failed or was waiting")
+    resume = commands.add_parser("resume", help="carry on a run that stopped, failed or was waiting",
+                                 description="Carry on a run. It keeps what the run was started with: the modules it may "
+                                             "use (--allow), --processes and the rest are not given again.")
     resume.add_argument("--dir", required=True)
     resume.add_argument("--budget", **budget)
     commands.add_parser("status", help="say where a run stands").add_argument("--dir", required=True)
@@ -154,8 +164,6 @@ def _node_serve(args, out) -> int:
     module, _, name = args.target.partition(":")
     if not name:
         module, _, name = args.target.rpartition(".")
-    if os.getcwd() not in sys.path:
-        sys.path.insert(0, os.getcwd())       # a module beside where the command is run can be named
     try:
         found: Any = importlib.import_module(module)
         for part in name.split("."):
@@ -179,9 +187,18 @@ def _node_serve(args, out) -> int:
 
 
 def main(argv=None, out=None) -> int:
+    import os
     out = out or sys.stdout
     args = _parser().parse_args(argv)
+    if os.getcwd() not in sys.path:
+        sys.path.insert(0, os.getcwd())       # as with python -m: a module beside where the command is run can be named
     try:
+        if args.command == "guide":
+            from .spec import Catalog, guide
+            out.write(guide(Catalog(allow=args.allow)))
+            if not args.allow:
+                out.write("Name the modules a graph may take functions from with --allow MODULE, here and on check and run.\n")
+            return 0
         if args.command == "check":
             state, code = check(_description(args.graph), allow=args.allow, processes=args.processes, files=_beside(args.graph), tools=args.tools, apps=args.apps,
                                  remotes=args.remote), 0
@@ -213,8 +230,15 @@ def main(argv=None, out=None) -> int:
     except (SpecError, JournalError, ValueError) as exc:
         state, code = {"status": "refused", "error": str(exc)}, 1
     encoding = (getattr(out, "encoding", None) or "utf-8").lower().replace("-", "")
-    json.dump(state, out, ensure_ascii=encoding != "utf8", indent=2)     # a console that is not UTF-8 gets escapes
-    out.write("\n")
+    try:
+        json.dump(state, out, ensure_ascii=encoding != "utf8", indent=2)     # a console that is not UTF-8 gets escapes
+        out.write("\n")
+        out.flush()
+    except OSError as exc:                    # the reader went away (| head): what it did not read is not an error
+        if not isinstance(exc, BrokenPipeError) and not (sys.platform == "win32" and exc.errno == errno.EINVAL):
+            raise                             # Windows says EINVAL for a pipe with no reader; anything else is real
+        if out is sys.stdout:                 # and Python's own flush at exit must not fail on it either
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
     return code
 
 

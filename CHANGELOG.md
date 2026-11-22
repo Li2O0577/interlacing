@@ -4,8 +4,36 @@ Versions before 1.0 may change any interface; each change is listed here. From 1
 by `interlacing` and the formats of graph files, run directories and journals change incompatibly only
 with a new major version.
 
-## Unreleased
+## 0.16.0
 
+- Security: `Catalog.function` lets through only functions defined in an allowed module. A name that reaches
+  through an allowed module into one it imported (`mypkg.os.system`), a name with a `__` part, and a function
+  imported into an allowed module from elsewhere are refused. Before, a graph written by a model, an MCP
+  client or a `SpawnNode` request could run any function the allowed module had imported.
+- The graph format is told: `interlacing.spec.GUIDE` (one page, with examples), `functions(catalog)` (the
+  functions a catalog allows, with signatures and first doc lines) and `guide(catalog)` (both). The MCP server
+  has a `guide` tool, the command line has `interlacing guide [--allow MODULE]...`, and `SpawnNode.tool(name=
+  "grow")` gives an agent the node as a tool whose description carries both.
+- Graph files are written as Python is: a `function` node reads its inputs, its output `out` and its context
+  from the function when they are not listed; a node of a chain, loop or fan may be a method written in place.
+- A part of a description in the wrong shape (an edge, a list of nodes, ports, inputs, outputs, `manages`) is
+  refused with a `SpecError` that shows the right shape, never a `TypeError` or `AttributeError`. A wrong port
+  or graph input is answered with the ones there are.
+- An agent paused while its model was answering holds the answer until it is resumed; stopped, it does not send
+  it.
+- A journaled run whose agent hires needs no `rebuild=`: a hired member carries `made_by` in its description,
+  and on resume the agent that hired it makes it again from the same template.
+- `GUIDE` lists the ports of the common kinds of node (`human`, `branch`, `until`, `pass`, `collect`, `spawn`,
+  `source`, `sink`); a test checks them against the nodes. An object with `__call__` whose class is defined in an
+  allowed module may be named.
+- When everything left in a run is paused, a node waiting on it (a lead waiting for a paused member) ends with
+  the run instead of being started again at once, which asked its model again and again and, with a fast model,
+  never ended.
+- `Run.answer` (and the `answer` command and tool) says which question it answered and that the run is to be
+  resumed. `interlacing --help` gives the exit codes, `resume --help` says it keeps what the run was started
+  with, and `guide` without `--allow` says how to name modules.
+- The command line puts the directory it is run in on the module search path, so `--allow` can name a module
+  beside it, and output closed early (`| head`) is no longer an error.
 - The README has a banner image (`docs/images/interlacing.jpg`).
 - `docs/GRAPH.en.md` is an English version of the full description; the two versions link to each other.
 - `docs/GRAPH.md`: a duplicated `artifact` row and a broken `Catalog` table were fixed, and the resident agent's

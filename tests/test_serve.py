@@ -66,7 +66,7 @@ def test_the_handshake_and_the_tool_list(tmp_path):
     assert server.handle({'jsonrpc': '2.0', 'method': 'notifications/initialized'}) is None
     assert server.handle({'jsonrpc': '2.0', 'id': 2, 'method': 'ping'})['result'] == {}
     listed = server.handle({'jsonrpc': '2.0', 'id': 3, 'method': 'tools/list'})['result']['tools']
-    assert [t['name'] for t in listed] == ['check', 'start', 'status', 'resume', 'stop', 'control', 'answer', 'runs'] and listed == TOOLS
+    assert [t['name'] for t in listed] == ['guide', 'check', 'start', 'status', 'resume', 'stop', 'control', 'answer', 'runs'] and listed == TOOLS
     assert all(t['inputSchema']['type'] == 'object' and t['description'] for t in listed)
     assert server.handle({'jsonrpc': '2.0', 'id': 4, 'method': 'resources/list'})['error']['code'] == -32601
     assert server.handle({'jsonrpc': '2.0', 'id': 5, 'method': 'tools/call', 'params': {'name': 'erase'}})['error']['code'] == -32602
@@ -268,3 +268,10 @@ def test_a_client_that_goes_away_leaves_nothing_running(tmp_path):
     until(GATES['entered'].is_set)
     client.close()
     assert tool(server, 'status', run=run)[1]['status'] == 'stopped' and not (tmp_path / run / 'lock').exists()
+
+
+def test_the_guide_tool_gives_the_format_and_the_functions_a_graph_may_name(tmp_path):
+    from interlacing.spec import GUIDE
+    failed, state = tool(Server(tmp_path, allow=[HERE]), 'guide')
+    assert not failed and state['guide'] == GUIDE
+    assert f'{HERE}.survey' in {f['name'] for f in state['functions']}

@@ -138,3 +138,34 @@ def test_the_installed_command_runs(tmp_path):
                           capture_output=True, text=True, encoding='utf-8')
     assert done.returncode == 0 and json.loads(done.stdout)['outputs'] == {'out': ['你好']}
     assert subprocess.run([sys.executable, '-m', 'interlacing.cli', '--version'], capture_output=True, text=True).stdout.strip()
+
+
+def test_guide_prints_the_format_and_the_allowed_functions():
+    out = io.StringIO()
+    assert cli.main(['guide', '--allow', HERE], out) == 0
+    assert out.getvalue().startswith('A graph is JSON.') and f'- {HERE}.' in out.getvalue()
+
+
+def test_a_module_beside_where_the_command_is_run_can_be_allowed(tmp_path, monkeypatch):
+    (tmp_path / 'besidemod.py').write_text('def up(text):\n    return text.upper()\n', encoding='utf-8')
+    write(tmp_path / 'g.json', {'method': 'chain', 'nodes': [{'id': 'u', 'kind': 'function', 'function': 'besidemod.up'}]})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, 'path', [p for p in sys.path if p not in ('', str(tmp_path))])
+    code, state = call('run', tmp_path / 'g.json', '--dir', tmp_path / 'r', '--allow', 'besidemod', '--input', 'in=hi')
+    assert code == 0 and state['outputs'] == {'out': ['HI']}
+
+
+def test_a_reader_that_goes_away_is_not_an_error(tmp_path):
+    import os
+    write(tmp_path / 'g.json', {'method': 'chain', 'nodes': [{'id': 'u', 'kind': 'function', 'function': f'{HERE}.shout'}]})
+    child = subprocess.Popen([sys.executable, '-c', 'import sys; from interlacing.cli import main; sys.exit(main())',
+                              'check', str(tmp_path / 'g.json'), '--allow', HERE],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(tmp_path),
+                             env={**os.environ, 'PYTHONPATH': os.path.dirname(os.path.abspath(__file__))})
+    child.stdout.close()                      # the reader is gone before anything is written
+    error = child.stderr.read().decode()
+    assert child.wait(60) == 0 and error == ''
+
+
+def shout(text):
+    return text.upper()

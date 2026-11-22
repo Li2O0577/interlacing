@@ -55,7 +55,7 @@ with tempfile.TemporaryDirectory() as temporary:
     served = subprocess.run(command + ["serve", "--runs", str(Path(temporary) / "served"), "--allow", "steps"], input=sent + "\n",
                             capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(data)})
     replies = [json.loads(line) for line in served.stdout.splitlines()]
-    assert served.returncode == 0 and len(replies[1]["result"]["tools"]) == 8, served.stderr
+    assert served.returncode == 0 and len(replies[1]["result"]["tools"]) == 9, served.stderr
     assert {r["id"]: r for r in replies}[3]["result"]["structuredContent"]["status"] == "waiting", replies
 
 print(f"interlacing {interlacing.__version__}: {len(interlacing.__all__) - 1} public names, {len(list(examples.glob('*.py')))} examples ran, the command line and the server ran")

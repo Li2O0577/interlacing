@@ -428,6 +428,14 @@ class AgentNode(Node):
                             "or give a function of the id that makes the node")
         return self._builder(described)
 
+    def remake(self, template: str, id: str) -> Node:
+        """A member it hired, made again from the same template when a journaled run is taken up."""
+        member = self._member(self.templates[template], id)
+        if isinstance(member, AgentNode) and member.hire > self.hire:
+            member.hire = self.hire
+        member.made_by = {"node": self.id, "template": template}
+        return member
+
     def _hire(self, ctx, args: Mapping) -> str:
         name, template = str(args.get("name", "")), str(args.get("template", ""))
         if self.hires >= self.hire:
@@ -443,6 +451,7 @@ class AgentNode(Node):
             return f"error: the template {template} cannot be made: {exc}"
         if isinstance(member, AgentNode) and member.hire > self.hire:
             member.hire = self.hire                  # it may hire no more than who hired it
+        member.made_by = {"node": self.id, "template": template}
         takes = [p for p in member.inputs.values() if p.required] or list(member.inputs.values())
         gives = [p for p in member.outputs.values() if not p.call]
         if not takes:
@@ -599,6 +608,8 @@ class AgentNode(Node):
             if not calls:
                 if self._choose:
                     self.messages = messages if self.memory else []
+                    return None
+                if not _step(ctx):         # paused while the model answered: the answer waits; stopped: it is not sent
                     return None
                 try:
                     try:

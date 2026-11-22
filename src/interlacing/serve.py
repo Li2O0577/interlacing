@@ -43,11 +43,15 @@ from .spec import SpecError
 VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 
-_GRAPH = {"type": "object", "description": "The graph as data: nodes, edges, inputs and outputs, or a method with its nodes."}
+_GRAPH = {"type": "object", "description": "The graph as data: nodes, edges, inputs and outputs, or a method with its "
+          "nodes. Call guide first for the format and the functions a graph may name."}
 _RUN = {"type": "string", "description": "The run's id, as start returned it."}
 _WAIT = {"type": "boolean", "description": "false: return at once with status running, and ask with status later. "
          "Default true: return when the run is done, waiting, stopped or failed."}
 TOOLS = [
+    {"name": "guide", "description": "How a graph is written, with examples, and the functions this server lets a "
+     "graph name. Read it before writing a graph.",
+     "inputSchema": {"type": "object", "properties": {}}},
     {"name": "check", "description": "Build a graph from its description without running it. Returns its digest, "
      "nodes, inputs and outputs, or says why it cannot be built.",
      "inputSchema": {"type": "object", "properties": {"graph": _GRAPH}, "required": ["graph"]}},
@@ -117,6 +121,10 @@ class Server:
         if not isinstance(graph, Mapping):
             raise SpecError("graph must be an object describing the graph")
         return graph
+
+    def guide(self, arguments: Mapping) -> dict:
+        from .spec import GUIDE, Catalog, functions
+        return {"guide": GUIDE, "functions": functions(Catalog(allow=self.allow))}
 
     def check(self, arguments: Mapping) -> dict:
         return check(self._graph(arguments), allow=self.allow, processes=self.processes, files=self.files, tools=self.tools, apps=self.apps,
@@ -240,7 +248,7 @@ class Server:
             asked = params.get("protocolVersion")
             return {"protocolVersion": asked if asked in VERSIONS else VERSIONS[0],
                     "capabilities": {"tools": {}}, "serverInfo": {"name": "interlacing", "version": __version__},
-                    "instructions": "Runs graphs of nodes written as data. check a graph, start it, and when a run "
+                    "instructions": "Runs graphs of nodes written as data. Read guide for the format, check a graph, start it, and when a run "
                                     "is waiting put its questions to the person, answer, then resume."}
         if method == "ping":
             return {}

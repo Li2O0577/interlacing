@@ -264,3 +264,23 @@ def test_a_hirer_may_give_up_when_a_member_fails():
     lead = AgentNode('lead', FakeProvider(policy), resident=True, hire=1, templates={'b': broken})
     with pytest.raises(Exception, match='lead gave up: a cannot divide'):
         Engine(GraphBuilder().add(lead).input('in', 'lead.task').compile(), workers=1).run({'in': 'go'})
+
+
+def test_a_journaled_run_whose_agent_hires_is_taken_up_without_a_rebuild(tmp_path):
+    path = tmp_path / 'j.jsonl'
+
+    def graph():
+        lead = AgentNode('lead', FakeProvider(lead_policy([])), resident=True, hire=1, templates={'helper': helper})
+        return GraphBuilder().add(lead).input('in', 'lead.task').output('out', 'lead.out').compile()
+    first = Engine(graph(), journal=Journal(path))
+    assert first.run({'in': 'go'}).last('out') == 'count: done'
+    again = Engine(graph(), journal=Journal(path))
+    assert again.resume().last('out') == 'count: done'
+
+
+def test_a_hired_member_is_made_again_from_the_template_that_made_it():
+    lead = AgentNode('lead', FakeProvider(lead_policy([])), resident=True, hire=1, templates={'helper': helper})
+    member = lead.remake('helper', 'lead-h1')
+    assert member.id == 'lead-h1' and member.made_by == {'node': 'lead', 'template': 'helper'}
+    added = Change().add(member).describe()
+    assert added[0][1]['made_by'] == {'node': 'lead', 'template': 'helper'}
