@@ -6,6 +6,8 @@
 
 Join anything into a graph and run it.
 
+[Python user and maintainer guide](docs/HANDBOOK.en.md)
+
 - A **node** is anything that takes information in and gives information out: a model, a function, an external program, a device, a person, or another graph.
 - An **edge** carries information from one node to another under a written protocol: queued values, latest value only, state, signals, streams, calls that are answered, files passed by path.
 - A **method** is a ready-made way of joining nodes: chain, loop, fan-out and join, tree, star, a tree that needs a person's consent, a pool of members that appear when called.
