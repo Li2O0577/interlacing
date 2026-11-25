@@ -211,3 +211,49 @@ def test_layers_above_the_abstractions_import_only_what_is_below_them():
                 elif isinstance(node, (ast.Import, ast.ImportFrom)):
                     names = [node.module] if isinstance(node, ast.ImportFrom) else [a.name for a in node.names]
                     assert all(n.split('.')[0] in sys.stdlib_module_names for n in names), f'{package}/{path.name}:{node.lineno}'
+
+
+@pytest.mark.parametrize('payload, expected_hashes', [('original', 2), (['original'], 4)])
+def test_fanout_hashes_the_final_body_and_shares_only_within_one_emit(monkeypatch, payload, expected_hashes):
+    from interlacing.base import Protocol, digest
+    from interlacing.engine import Transport, scheduler
+
+    class Decorate(Protocol):
+        name = 'decorate'
+
+        def encode(self, value, source):
+            return 'encoded'
+
+    class Carry(Transport):
+        def carry(self, edge, body):
+            return 'transported' if edge == 'transport' else body
+
+    def send(ctx, x):
+        for _ in range(2):
+            ctx.emit('y', payload)
+
+    protocols = DEFAULT.copy()
+    protocols.register(Decorate())
+    builder = GraphBuilder().add(fn('source', send, context=True)).input('in', 'source.x')
+    for name, protocol in [('a', 'value'), ('b', 'decorate'), ('c', 'value'), ('transport', 'value')]:
+        builder.add(fn(name, lambda x: x)).connect('source.y', f'{name}.x', protocol, id=name).output(name, f'{name}.y')
+
+    hashed, posted = [], []
+    def counted(body):
+        hashed.append(body)
+        return digest(body)
+
+    engine = Engine(builder.compile(protocols), protocols, transport=Carry())
+    original = engine._post
+    def capture(feed, envelope, act):
+        posted.append(envelope)
+        return original(feed, envelope, act)
+
+    monkeypatch.setattr(scheduler, 'digest', counted)
+    monkeypatch.setattr(engine, '_post', capture)
+    result = engine.run({'in': 1})
+    assert hashed.count(payload) == expected_hashes
+    assert result.outputs == {'a': [payload] * 2, 'c': [payload] * 2,
+                              'b': ['encoded'] * 2, 'transport': ['transported'] * 2}
+    assert all(e.digest == digest(e.body) for e in posted)
+    assert len({e.id for e in posted}) == len(posted)

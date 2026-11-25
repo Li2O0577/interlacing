@@ -443,6 +443,18 @@ class Run:
         _write(self.directory / "state.json", state)
         return {**state, "questions": self.questions()}
 
+    def show(self, *, timeline: bool = False) -> dict:
+        """Inspect the saved graph and journal without constructing or running nodes."""
+        from .inspection import explain
+        self._held()
+        state = _read(self.directory / "state.json", {})
+        status = RUNNING if _holder(self.directory) else state.get("status", NEW)
+        view = explain(_read(self.directory / "graph.json"), self.directory / "journal.jsonl",
+                       status, self.questions(), timeline=timeline)
+        if status == FAILED:
+            view["failure"] = {k: state[k] for k in ("node", "error") if k in state}
+        return view
+
     def status(self) -> dict:
         state = _read(self.directory / "state.json")
         if state is None:

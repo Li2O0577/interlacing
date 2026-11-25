@@ -122,6 +122,29 @@ class InPort:
         self.ready = False
 
 
+class ReviewState:
+    """Challenges at this node. The engine lock guards these transitions."""
+    __slots__ = ("pending", "shown", "open", "answering", "awaiting")
+
+    def __init__(self) -> None:
+        self.pending: deque[Rejection] = deque()
+        self.shown = 0
+        self.open: dict[str, Rejection] = {}
+        self.answering: Rejection | None = None
+        self.awaiting: Rejection | None = None
+
+    def take(self) -> list[dict]:
+        taken = [r for r in self.pending if r.answer is None]
+        self.pending.clear()
+        self.shown = 0
+        self.open.update((r.id, r) for r in taken)
+        return [r.shown() for r in taken]
+
+    def defer_open(self) -> None:
+        self.pending.extendleft(r for r in reversed(list(self.open.values())) if r.answer is None)
+        self.open.clear()
+
+
 class State:
     """One node as the run sees it."""
 
@@ -129,7 +152,7 @@ class State:
                  "opened", "round", "outs", "calls", "passive", "streams", "called", "since", "time_limit", "rejected", "delivered",
                  "inner", "status", "halt", "holding", "paused_at", "waiting", "late", "resuming", "resumed", "opening",
                  "emitted", "sent_log", "read_log", "redo", "reading", "redoing", "replaced",
-                 "challenged", "shown", "open", "answering", "took_on", "awaiting", "failures", "failures_shown")
+                 "reviews", "took_on", "failures", "failures_shown")
 
     def __init__(self, node: Node):
         self.node = node
@@ -166,12 +189,8 @@ class State:
         self.reading: Reading | None = None       # this activation, as it would be run again
         self.redoing: dict[str, deque] | None = None     # it runs one again: port -> the names it corrects
         self.replaced: dict[str, str] = {}        # this activation: port -> the id the message it took corrects
-        self.challenged: deque = deque()          # rejections of what it sent, not yet taken up
-        self.shown = 0                            # how many of those its running activation has been woken for
-        self.open: dict[str, Rejection] = {}      # rejections taken up and not yet answered
-        self.answering: Rejection | None = None   # this activation answers a rejection (Node.challenged)
+        self.reviews = ReviewState()
         self.took_on: dict[str, list] = {}        # this activation: port -> [(feed, envelope), ...] it took there
-        self.awaiting: Rejection | None = None    # the rejection this activation waits on
         self.failures: list = []                  # failures of nodes it manages, come to it and not taken up
         self.failures_shown = 0                   # how many of those its running activation has been woken for
 
@@ -186,8 +205,8 @@ class State:
         self.resumed = False
         self.reading = None
         self.redoing = None
-        self.answering = None
-        self.shown = 0
+        self.reviews.answering = None
+        self.reviews.shown = 0
         self.failures_shown = 0
         if self.took_on:
             self.took_on = {}

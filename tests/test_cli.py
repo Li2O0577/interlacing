@@ -2,6 +2,7 @@
 import io
 import json
 import subprocess
+from pathlib import Path
 import sys
 
 import pytest
@@ -169,3 +170,77 @@ def test_a_reader_that_goes_away_is_not_an_error(tmp_path):
 
 def shout(text):
     return text.upper()
+
+
+def test_show_explains_first_delivery_without_loading_nodes_or_repairing_journal(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.chdir(root / 'examples/data')
+    run = tmp_path / 'run'
+    assert call('run', 'release.json', '--allow', 'steps', '--dir', run, '--input', 'topic=tides')[0] == 3
+    path = run / 'journal.jsonl'
+    original = path.read_bytes()
+    path.write_bytes(original + b'{"kind":')
+    with monkeypatch.context() as context:
+        context.setattr(Run, '_engine', lambda self: pytest.fail('inspection constructed nodes'))
+        code, view = call('show', '--dir', run)
+    assert code == 0 and view['nodes']['editor']['questions'] == ['editor-1']
+    publish = view['nodes']['publish']
+    assert publish['awaiting_first_delivery_from'] == ['editor.answer']
+    assert publish['inputs']['note'][0]['delivery_recorded']
+    assert path.read_bytes() == original + b'{"kind":'
+    path.write_bytes(original)
+    assert call('answer', '--dir', run, '--json', '{"approved": true}')[0] == 0
+    assert 'questions' not in call('show', '--dir', run)[1]['nodes']['editor']
+    assert call('resume', '--dir', run)[0] == 0
+    done = call('show', '--dir', run)[1]
+    assert done['status'] == 'done' and done['nodes']['publish']['activation_recorded']
+    assert 'awaiting_first_delivery_from' not in done['nodes']['publish']
+
+
+def test_show_marks_changed_topology_and_reports_corrupt_complete_records(tmp_path):
+    run = Run.create(tmp_path, {'method': 'chain', 'nodes': [node('a', 'survey')]}, allow=[HERE])
+    assert run.show()['status'] == 'new'
+    journal = tmp_path / 'journal.jsonl'
+    journal.write_text('{"kind":"change"}\n', encoding='utf-8')
+    assert run.show()['topology'].startswith('last known graph')
+    journal.write_text('invalid\n', encoding='utf-8')
+    assert call('show', '--dir', tmp_path)[0] == 1
+
+
+def test_show_replays_dynamic_topology_and_formats(tmp_path, monkeypatch):
+    import importlib
+    example = Path(__file__).resolve().parents[1] / 'examples' / 'graphs'
+    monkeypatch.syspath_prepend(str(example))
+    module = importlib.import_module('changed_while_running')
+    plan = {'id': 'plan', 'kind': 'function', 'function': module.__name__ + '.plan',
+            'context': True, 'inputs': ['task'], 'outputs': ['p0', 'p1']}
+    run = Run.create(tmp_path, {'nodes': [plan], 'inputs': {'in': 'plan.task'}}, allow=[module.__name__])
+    assert run.start({'in': 'alpha, beta'})['status'] == 'done'
+    view = run.show(timeline=True)
+    assert set(view['nodes']) == {'plan', 'solve0', 'solve1'}
+    assert view['topology'] == 'journaled graph' and view['outputs']['part1'] == 'solve1.y'
+    assert any(e.get('operations', []).count('add') == 2 for e in view['timeline'])
+    assert all(e['elapsed_seconds'] >= 0 for e in view['timeline'] if e['kind'] == 'act')
+    for fmt, header in [('dot', 'digraph'), ('mermaid', 'flowchart')]:
+        out = io.StringIO()
+        assert cli.main(['show', '--dir', str(tmp_path), '--format', fmt], out) == 0
+        assert out.getvalue().startswith(header) and 'p1 to x (value)' in out.getvalue()
+
+
+def test_show_forgets_removed_members_and_their_delivery_evidence(tmp_path):
+    from interlacing.inspection import explain
+    def part(name):
+        return {'id': name, 'firing': 'all', 'inputs': [{'name': 'x', 'required': True}], 'outputs': []}
+    edge = {'id': 'e', 'from': 'a.y', 'to': 'b.x', 'protocol': 'value'}
+    graph = {'nodes': [part('a'), part('b')], 'edges': [edge], 'inputs': {}, 'outputs': {'old': 'b.y'},
+             'manages': {'a': ['b']}}
+    path = tmp_path / 'journal'
+    records = [{'kind': 'act', 'node': 'a', 'sent': [['e', 1]]},
+               {'kind': 'act', 'node': 'a', 'changes': [[['remove', 'b'], ['add', part('c')],
+                 ['connect', dict(edge, to='c.x')], ['manage', 'a', ['c']], ['output', 'new', 'c.y']]]}]
+    path.write_text(''.join(json.dumps(r) + '\n' for r in records))
+    view = explain(graph, path, 'waiting', [], timeline=True)
+    assert set(view['nodes']) == {'a', 'c'} and view['outputs'] == {'new': 'c.y'}
+    assert view['managers'] == {'c': 'a'}
+    assert view['nodes']['c']['awaiting_first_delivery_from'] == ['a.y']
+    assert all('elapsed_seconds' not in e for e in view['timeline'])

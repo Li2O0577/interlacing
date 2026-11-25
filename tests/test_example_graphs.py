@@ -140,3 +140,55 @@ def test_directed_rejection(capsys):
     assert result.last('area') == 75.0
     assert result.last('log') == 'logged: quick: 74 m2, measured after a rejection (50 is far from 76)'
     assert result.outputs['log'] == [result.last('log')] and result.rounds['merge'] == 1
+
+
+@pytest.mark.parametrize('wrong_units', [True, False])
+def test_simulation_review_after_interrupted_answer(tmp_path, wrong_units):
+    from simulation_review import experiment
+    from interlacing import Engine, Journal, RunError
+    calls = []
+    journal = Journal(tmp_path / 'journal.jsonl')
+
+    def interrupt():
+        raise RuntimeError('interrupted assessment')
+
+    with pytest.raises(RunError, match='interrupted assessment'):
+        Engine(experiment(wrong_units, calls, interrupt), journal=journal).run({'steps': 100})
+    result = Engine(experiment(wrong_units, calls), journal=journal).resume()
+    assert calls == [100] and result.last('report') == 0.366
+    assert result.last('verdict') == ('corrected' if wrong_units else 'explained')
+    actions = [r['action'] for r in journal.read() if r['kind'] == 'control' and r['nodes'] == ['b2']]
+    assert actions == (['pause', 'resume'] if wrong_units else [])
+
+
+def test_simulation_recovers_when_process_exits_after_pause(tmp_path):
+    import subprocess
+    from simulation_review import experiment
+    from interlacing import Engine, Journal
+    from interlacing.inspection import explain
+    from interlacing.spec import dump
+
+    path = tmp_path / 'events.jsonl'
+    script = """
+import os
+import sys
+from interlacing import Engine, Journal
+from simulation_review import experiment
+
+def cut(event):
+    if event['event'] == 'control' and event['action'] == 'pause':
+        os._exit(37)
+
+Engine(experiment(True, []), journal=Journal(sys.argv[1]), observe=cut).run({'steps': 100})
+"""
+    proc = subprocess.run([sys.executable, '-c', script, str(path)], cwd=EXAMPLES, timeout=20)
+    assert proc.returncode == 37
+    calls = []
+    graph = experiment(True, calls)
+    resumed = Engine(graph, journal=Journal(path)).resume()
+    assert calls == [] and resumed.last('report') == 0.366
+    timeline = explain(dump(graph), path, 'done', [], timeline=True)['timeline']
+    assert [e['action'] for e in timeline if e['kind'] == 'control'] == ['pause', 'resume']
+    assert [e['answer'] for e in timeline if e['kind'] == 'verdict'] == ['corrected']
+    assert sum(e['kind'] == 'challenged' for e in timeline) == 2
+    assert sum(e.get('amounts', {}).get('simulations', 0) for e in timeline) == 1

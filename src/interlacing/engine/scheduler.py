@@ -32,7 +32,7 @@ class Scheduler:
             return
         if state.resuming:
             can = True                       # it goes on from the progress it saved, with or without new messages
-        elif state.challenged:
+        elif state.reviews.pending:
             can = True                       # what it sent was rejected: it is to answer
         elif state.redo:
             can = True                       # something an earlier activation read was corrected: it runs again
@@ -51,16 +51,18 @@ class Scheduler:
 
     refresh = staticmethod(refresh)
 
-    def envelope(self, feed: Feed, body: Any, round: int, cause: tuple, replaces: str = "") -> Envelope:
+    def envelope(self, feed: Feed, body: Any, round: int, cause: tuple, replaces: str = "",
+                 *, body_digest: str | None = None) -> Envelope:
         """The next envelope on ``feed``."""
         feed.sent += 1
-        if isinstance(body, Ref):
-            body_digest = body.digest
-        else:
-            try:
-                body_digest = digest(body)
-            except (TypeError, ValueError):
-                body_digest = ""    # not plain data: it can travel inside the process, but it has no content hash
+        if body_digest is None:
+            if isinstance(body, Ref):
+                body_digest = body.digest
+            else:
+                try:
+                    body_digest = digest(body)
+                except (TypeError, ValueError):
+                    body_digest = ""    # not plain data: it can travel inside the process, but it has no content hash
         self.envelopes += 1
         return Envelope(f"{feed.id}#{feed.sent}", feed.id, feed.sent, round, body, body_digest, cause, replaces)
 
@@ -136,8 +138,8 @@ class Scheduler:
             state.resuming, state.resumed = False, True
             state.opening = []
             return inputs, (), ()
-        if state.challenged:                 # it answers a rejection of what it sent (Node.challenged)
-            state.answering = state.challenged.popleft()
+        if state.reviews.pending:                 # it answers a rejection of what it sent (Node.challenged)
+            state.reviews.answering = state.reviews.pending.popleft()
             state.opening = []
             return inputs, (), ()
         if state.redo:                       # an earlier activation runs again with what was corrected
