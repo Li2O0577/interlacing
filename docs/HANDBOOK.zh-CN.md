@@ -177,7 +177,9 @@ interlacing answer --dir demo-run --json '{"approved": true}'
 interlacing resume --dir demo-run
 ```
 
-用 `interlacing show --dir demo-run` 可以按输入端口查看已记录的投递。等待审批时，`publish.note` 已收到来自 `draft.note` 的投递，`publish.verdict` 还在等 `editor.answer` 的首次投递记录。命令仅读取保存的图和完整日志行，无需加载节点代码。正在运行时展示的也是已落盘的证据。拓扑发生变化时会标明展示的是初始图，并省略等待推断。
+用 `interlacing show --dir demo-run` 可以按输入端口查看已记录的投递。等待审批时，`publish.note` 已收到来自 `draft.note` 的投递，`publish.verdict` 还在等 `editor.answer` 的首次投递记录。命令仅读取保存的图和完整日志行，无需加载节点代码。正在运行时展示的也是已落盘的证据。图中的增删节点与接线会根据已提交的变更重建。
+
+加 `--timeline` 按日志顺序看激活轮次、质疑与答复、节点开关和上报用量。新日志的 `elapsed_seconds` 是本次激活记录片段的墙钟耗时（包括等待）；旧记录没有耗时字段。失败运行另有 `failure`。用 `--format mermaid` 或 `--format dot` 导出节点与端口连线。若外部替换图只留下摘要，输出会标明最后已知拓扑。[模拟结果的两种审查路径](../examples/graphs/simulation_review.py)
 
 `run/resume` 的退出码：`0` 完成，`1` 失败或被拒绝，`3` 等人，`4` 已停止。`status` 查运行状态和问题，`files` 查文件归属，`control pause|resume|stop|restart` 操作单个节点或管理树。目录内有 `graph.json`、`options.json`、`inputs.json`、`journal.jsonl`、`state.json` 和问题、答复、文件。继续整次运行用 `resume --dir`；让某个暂停节点恢复用 `control resume NODE --dir`。
 

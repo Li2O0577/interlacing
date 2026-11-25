@@ -127,7 +127,11 @@ def _parser() -> argparse.ArgumentParser:
                                              "use (--allow), --processes and the rest are not given again.")
     resume.add_argument("--dir", required=True)
     resume.add_argument("--budget", **budget)
-    commands.add_parser("show", help="explain recorded input deliveries and first-activation waits").add_argument("--dir", required=True)
+    show = commands.add_parser("show", help="inspect recorded dependencies, events and topology")
+    show.add_argument("--dir", required=True)
+    style = show.add_mutually_exclusive_group()
+    style.add_argument("--timeline", action="store_true", help="include events in journal order")
+    style.add_argument("--format", choices=["json", "dot", "mermaid"], default="json")
     commands.add_parser("status", help="say where a run stands").add_argument("--dir", required=True)
     control = commands.add_parser("control", help="pause, resume, stop or restart nodes of a run")
     control.add_argument("action", choices=["pause", "resume", "stop", "restart"])
@@ -224,7 +228,7 @@ def main(argv=None, out=None) -> int:
             elif args.command == "control":
                 state = Run(args.dir).control(args.nodes, args.action, team=args.team)
             elif args.command == "show":
-                state = Run(args.dir).show()
+                state = Run(args.dir).show(timeline=args.timeline)
             elif args.command == "files":
                 state = {"files": Run(args.dir).files()}
             else:
@@ -234,7 +238,11 @@ def main(argv=None, out=None) -> int:
         state, code = {"status": "refused", "error": str(exc)}, 1
     encoding = (getattr(out, "encoding", None) or "utf-8").lower().replace("-", "")
     try:
-        json.dump(state, out, ensure_ascii=encoding != "utf8", indent=2)     # a console that is not UTF-8 gets escapes
+        if args.command == "show" and args.format != "json" and code == 0:
+            from .inspection import diagram
+            out.write(diagram(state, args.format))
+        else:
+            json.dump(state, out, ensure_ascii=encoding != "utf8", indent=2)
         out.write("\n")
         out.flush()
     except OSError as exc:                    # the reader went away (| head): what it did not read is not an error

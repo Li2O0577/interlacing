@@ -1,4 +1,5 @@
 """Fan-out timings and burst memory, using the package selected by PYTHONPATH."""
+import gc
 import statistics
 import time
 import tracemalloc
@@ -52,11 +53,22 @@ def burst(count):
     tracemalloc.start()
     try:
         engine.run({"in": count})
+        gc.collect()
         retained, peak = tracemalloc.get_traced_memory()
+        # Destructive attribution on a finished, disposable benchmark engine only.
+        assert not any(feed.box for feed in engine._feeds.values())
+        for state in engine._states.values():
+            state.read_log.clear()
+        gc.collect()
+        after_reads = tracemalloc.get_traced_memory()[0]
+        for state in engine._states.values():
+            state.sent_log.clear()
+        gc.collect()
+        after_sends = tracemalloc.get_traced_memory()[0]
     finally:
         tracemalloc.stop()
     assert consumed == count
-    return peak_pending, retained / 2**20, peak / 2**20
+    return peak_pending, [value / 2**20 for value in (peak, retained, after_reads, after_sends)]
 
 
 if __name__ == "__main__":
@@ -64,5 +76,6 @@ if __name__ == "__main__":
         for width in (1, 8):
             print(f"{width} sinks, {size} bytes: {timing(width, size):.2f} ms")
     for count in (128, 2048):
-        pending, retained, peak = burst(count)
-        print(f"{pending} pending, 8 KiB each: {peak:.2f} MiB peak, {retained:.2f} MiB after drain")
+        pending, (peak, retained, reads, sends) = burst(count)
+        print(f"{pending} pending, 8 KiB each: {peak:.2f} MiB peak, {retained:.2f} MiB after drain, "
+              f"{reads:.2f} after dropping read history, {sends:.2f} after dropping sent history")

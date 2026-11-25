@@ -32,7 +32,7 @@ class Scheduler:
             return
         if state.resuming:
             can = True                       # it goes on from the progress it saved, with or without new messages
-        elif state.challenged:
+        elif state.reviews.pending:
             can = True                       # what it sent was rejected: it is to answer
         elif state.redo:
             can = True                       # something an earlier activation read was corrected: it runs again
@@ -138,8 +138,8 @@ class Scheduler:
             state.resuming, state.resumed = False, True
             state.opening = []
             return inputs, (), ()
-        if state.challenged:                 # it answers a rejection of what it sent (Node.challenged)
-            state.answering = state.challenged.popleft()
+        if state.reviews.pending:                 # it answers a rejection of what it sent (Node.challenged)
+            state.reviews.answering = state.reviews.pending.popleft()
             state.opening = []
             return inputs, (), ()
         if state.redo:                       # an earlier activation runs again with what was corrected

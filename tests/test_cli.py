@@ -202,6 +202,45 @@ def test_show_marks_changed_topology_and_reports_corrupt_complete_records(tmp_pa
     assert run.show()['status'] == 'new'
     journal = tmp_path / 'journal.jsonl'
     journal.write_text('{"kind":"change"}\n', encoding='utf-8')
-    assert run.show()['topology'].startswith('initial graph')
+    assert run.show()['topology'].startswith('last known graph')
     journal.write_text('invalid\n', encoding='utf-8')
     assert call('show', '--dir', tmp_path)[0] == 1
+
+
+def test_show_replays_dynamic_topology_and_formats(tmp_path, monkeypatch):
+    import importlib
+    example = Path(__file__).resolve().parents[1] / 'examples' / 'graphs'
+    monkeypatch.syspath_prepend(str(example))
+    module = importlib.import_module('changed_while_running')
+    plan = {'id': 'plan', 'kind': 'function', 'function': module.__name__ + '.plan',
+            'context': True, 'inputs': ['task'], 'outputs': ['p0', 'p1']}
+    run = Run.create(tmp_path, {'nodes': [plan], 'inputs': {'in': 'plan.task'}}, allow=[module.__name__])
+    assert run.start({'in': 'alpha, beta'})['status'] == 'done'
+    view = run.show(timeline=True)
+    assert set(view['nodes']) == {'plan', 'solve0', 'solve1'}
+    assert view['topology'] == 'journaled graph' and view['outputs']['part1'] == 'solve1.y'
+    assert any(e.get('operations', []).count('add') == 2 for e in view['timeline'])
+    assert all(e['elapsed_seconds'] >= 0 for e in view['timeline'] if e['kind'] == 'act')
+    for fmt, header in [('dot', 'digraph'), ('mermaid', 'flowchart')]:
+        out = io.StringIO()
+        assert cli.main(['show', '--dir', str(tmp_path), '--format', fmt], out) == 0
+        assert out.getvalue().startswith(header) and 'p1 to x (value)' in out.getvalue()
+
+
+def test_show_forgets_removed_members_and_their_delivery_evidence(tmp_path):
+    from interlacing.inspection import explain
+    def part(name):
+        return {'id': name, 'firing': 'all', 'inputs': [{'name': 'x', 'required': True}], 'outputs': []}
+    edge = {'id': 'e', 'from': 'a.y', 'to': 'b.x', 'protocol': 'value'}
+    graph = {'nodes': [part('a'), part('b')], 'edges': [edge], 'inputs': {}, 'outputs': {'old': 'b.y'},
+             'manages': {'a': ['b']}}
+    path = tmp_path / 'journal'
+    records = [{'kind': 'act', 'node': 'a', 'sent': [['e', 1]]},
+               {'kind': 'act', 'node': 'a', 'changes': [[['remove', 'b'], ['add', part('c')],
+                 ['connect', dict(edge, to='c.x')], ['manage', 'a', ['c']], ['output', 'new', 'c.y']]]}]
+    path.write_text(''.join(json.dumps(r) + '\n' for r in records))
+    view = explain(graph, path, 'waiting', [], timeline=True)
+    assert set(view['nodes']) == {'a', 'c'} and view['outputs'] == {'new': 'c.y'}
+    assert view['managers'] == {'c': 'a'}
+    assert view['nodes']['c']['awaiting_first_delivery_from'] == ['a.y']
+    assert all('elapsed_seconds' not in e for e in view['timeline'])

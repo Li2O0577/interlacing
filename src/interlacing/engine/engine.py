@@ -562,8 +562,8 @@ class Engine:
     def _hear(self, state: State, ctx: RunContext, ports: frozenset | None, until: float | None) -> tuple:
         """One look, under the lock: ("got", message), ("none", None) when nothing can come or the time is up
         or the node is to end, or ("wait", seconds)."""
-        if len(state.challenged) > state.shown:      # something it sent was rejected: it is told at once
-            state.shown = len(state.challenged)
+        if len(state.reviews.pending) > state.reviews.shown:      # something it sent was rejected: it is told at once
+            state.reviews.shown = len(state.reviews.pending)
             return "got", {}
         if len(state.failures) > state.failures_shown:      # a node it manages failed: it is told at once
             state.failures_shown = len(state.failures)
@@ -654,8 +654,8 @@ class Engine:
     @staticmethod
     def _stirred(state: State) -> bool:
         """A waiting activation has something to wake for besides a message. Under the lock."""
-        awaiting = state.awaiting
-        return (len(state.challenged) > state.shown or len(state.failures) > state.failures_shown
+        awaiting = state.reviews.awaiting
+        return (len(state.reviews.pending) > state.reviews.shown or len(state.failures) > state.failures_shown
                 or (awaiting is not None and awaiting.answer is not None))
 
     @staticmethod
@@ -723,8 +723,10 @@ class Engine:
                 sent.setdefault(sender.sent_log[name].port, []).append(name)
         rejection = Rejection(f"{feed.id}!{feed.rejected}", feed, envelope.id, feed.out, message, content, str(reason),
                               state.node.id, sent)
-        sender.challenged.append(rejection)
-        state.awaiting = rejection
+        if self._recorder is not None:
+            self._recorder.review("challenged", rejection)
+        sender.reviews.pending.append(rejection)
+        state.reviews.awaiting = rejection
         self._sched.consider(sender)
         self._lock.notify_all()
         return rejection
@@ -742,7 +744,9 @@ class Engine:
                 self._withdraw(rejection, "no answer can come: the sender has ended or waits too")
             else:
                 return None
-        state.awaiting = None
+        state.reviews.awaiting = None
+        if self._recorder is not None:
+            self._recorder.review("verdict", rejection)
         return rejection.verdict()
 
     @staticmethod
@@ -751,20 +755,20 @@ class Engine:
         sender = rejection.feed.source
         if sender is not None:
             try:
-                sender.challenged.remove(rejection)
+                sender.reviews.pending.remove(rejection)
             except ValueError:
-                sender.open.pop(rejection.id, None)
+                sender.reviews.open.pop(rejection.id, None)
 
     def _unheard(self, state: State, why: str) -> None:
         """``state`` will not answer the rejections of what it sent: each is refused now. Under the lock."""
-        waiting = [*state.challenged, *state.open.values()]
+        waiting = [*state.reviews.pending, *state.reviews.open.values()]
         if not waiting:
             return
         for rejection in waiting:
             if rejection.answer is None:
                 rejection.settle("refused", why)
-        state.challenged.clear()
-        state.open.clear()
+        state.reviews.pending.clear()
+        state.reviews.open.clear()
         self._lock.notify_all()
 
     def _reject(self, state: State, ctx: RunContext, port: str, reason: str, which: str | None = None) -> dict:
@@ -856,17 +860,12 @@ class Engine:
         with self._lock:
             if not state.running or ctx._state is not state:
                 raise NodeError(f"{state.node.id} can take up rejections only in an activation of its own")
-            taken = [r for r in state.challenged if r.answer is None]
-            state.challenged.clear()
-            state.shown = 0
-            for rejection in taken:
-                state.open[rejection.id] = rejection
-            return [rejection.shown() for rejection in taken]
+            return state.reviews.take()
 
     def _explain(self, state: State, id: str, text: str) -> None:
         """``ctx.explain``: what was rejected stands, for this reason."""
         with self._lock:
-            rejection = state.open.pop(str(id), None)
+            rejection = state.reviews.open.pop(str(id), None)
             if rejection is None:
                 raise NodeError(f"{state.node.id} has no rejection {id!r} to answer")
             rejection.settle("explained", str(text))
@@ -874,22 +873,22 @@ class Engine:
 
     def _answer(self, state: State, ctx: RunContext) -> None:
         """An activation that answers a rejection no activation of the node took up: ``Node.challenged``."""
-        rejection = state.answering
+        rejection = state.reviews.answering
         assert rejection is not None
         with self._lock:
             if rejection.answer is not None:
                 return
-            state.open[rejection.id] = rejection
+            state.reviews.open[rejection.id] = rejection
         answer = waited(state.node.challenged(ctx, rejection.shown()))
         self._unanswered(state, rejection, answer)
 
     async def _aanswer(self, state: State, ctx: RunContext) -> None:
-        rejection = state.answering
+        rejection = state.reviews.answering
         assert rejection is not None
         with self._lock:
             if rejection.answer is not None:
                 return
-            state.open[rejection.id] = rejection
+            state.reviews.open[rejection.id] = rejection
         answer = state.node.challenged(ctx, rejection.shown())
         if inspect.isawaitable(answer):
             answer = await answer
@@ -897,7 +896,7 @@ class Engine:
 
     def _unanswered(self, state: State, rejection: Rejection, answer: Any) -> None:
         with self._lock:
-            state.open.pop(rejection.id, None)
+            state.reviews.open.pop(rejection.id, None)
             if state.status == STOPPED:         # stopped while it answered: what it returns is not its answer
                 settled = rejection.settle("refused", "the sender was stopped, and cannot answer")
             else:
@@ -1211,7 +1210,7 @@ class Engine:
         if not state.opened:
             state.opened = True
             waited(node.open(ctx))
-        if state.answering is not None:
+        if state.reviews.answering is not None:
             self._answer(state, ctx)
             if act is not None:
                 self._snap(node, ctx._act)
@@ -1239,7 +1238,7 @@ class Engine:
             opened = node.open(ctx)
             if inspect.isawaitable(opened):
                 await opened
-        if state.answering is not None:
+        if state.reviews.answering is not None:
             await self._aanswer(state, ctx)
             self._snap(node, ctx._act)
             return
@@ -1282,11 +1281,10 @@ class Engine:
         when the engine has already returned and what the activation did is thrown away."""
         lock, sched, node = self._lock, self._sched, state.node
         act = ctx._act                  # the record it is writing now: a new one after each commit
-        if state.open:                  # rejections it took up and did not answer: Node.challenged answers them
+        if state.reviews.open:                  # rejections it took up and did not answer: Node.challenged answers them
             with lock:
-                state.challenged.extendleft(r for r in reversed(list(state.open.values())) if r.answer is None)
-                state.open.clear()
-        if state.challenged and state.status == STOPPED:
+                state.reviews.defer_open()
+        if state.reviews.pending and state.status == STOPPED:
             with lock:
                 self._unheard(state, "the sender was stopped, and cannot answer")
         if failure is not None:
@@ -1599,7 +1597,7 @@ class Engine:
                 act.sent.append(envelope)
                 act.fixed_box.append(old)
             return envelope.id
-        awaiting = receiver.awaiting
+        awaiting = receiver.reviews.awaiting
         if awaiting is not None and awaiting.envelope == old and awaiting.answer is None:
             # the receiver rejected it and waits: the correction is its answer, and nothing else follows
             envelope = sched.envelope(feed, body, round, cause, old)
@@ -1615,7 +1613,7 @@ class Engine:
             self._retook(receiver.took_on.get(feed.port.port.name), feed, old, envelope)
             awaiting.settle("corrected", value=value)
             if awaiting.feed.source is not None:
-                awaiting.feed.source.open.pop(awaiting.id, None)
+                awaiting.feed.source.reviews.open.pop(awaiting.id, None)
             self._lock.notify_all()
             return envelope.id
         rule = receiver.node.on_correction

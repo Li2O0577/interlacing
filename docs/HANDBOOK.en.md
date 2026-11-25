@@ -177,7 +177,9 @@ interlacing answer --dir demo-run --json '{"approved": true}'
 interlacing resume --dir demo-run
 ```
 
-Use `interlacing show --dir demo-run` to inspect recorded deliveries by input port. While the run waits for approval, `publish.note` has a delivery from `draft.note` and `publish.verdict` awaits the first recorded delivery from `editor.answer`. The command reads the saved graph and complete journal lines without loading node code. It reports historical evidence even for a running process. For a changed topology it labels the initial graph and omits wait inference.
+Use `interlacing show --dir demo-run` to inspect recorded deliveries by input port. While the run waits for approval, `publish.note` has a delivery from `draft.note` and `publish.verdict` awaits the first recorded delivery from `editor.answer`. The command reads the saved graph and complete journal lines without loading node code. It reports historical evidence even for a running process. Committed additions, removals and wiring changes reconstruct the recorded graph.
+
+Add `--timeline` to inspect activation rounds, challenges and verdicts, switches and usage in journal order. New activation records include `elapsed_seconds`, wall time for that segment including waits. Older records omit it. Failed runs also return `failure`. Export node and port connections with `--format mermaid` or `--format dot`. An external graph replacement recorded only as a digest leaves the last known topology labeled as such. [Two review paths for a simulation](../examples/graphs/simulation_review.py)
 
 Exit codes for `run/resume`: `0` completed, `1` failed or refused, `3` waiting for a person, `4` stopped. `status` inspects state and questions, `files` shows file ownership, and `control pause|resume|stop|restart` operates on nodes or their managed subtree. The directory holds `graph.json`, `options.json`, `inputs.json`, `journal.jsonl`, `state.json`, questions, answers and files. Use `resume --dir` to continue a run and `control resume NODE --dir` to switch on a paused node.
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -22,9 +23,10 @@ class Act:
     """What one activation did, for the journal."""
 
     __slots__ = ("node", "round", "took", "sent", "out", "limited", "calls", "snaps", "problems", "changes", "emits",
-                 "fixed_box", "fixed_out", "rejects")
+                 "fixed_box", "fixed_out", "rejects", "started")
 
     def __init__(self, node: str, round: int, took: tuple) -> None:
+        self.started = time.monotonic()
         self.node, self.round, self.took = node, round, took
         self.sent: list[Envelope] = []
         self.out: list[tuple] = []
@@ -65,6 +67,7 @@ class Recorder:
     def act(self, act: Act, open: bool = False) -> None:
         """What an activation did. ``open``: it saved its progress and goes on (``ctx.commit``)."""
         self.journal.write({"kind": "act", "node": act.node, "round": act.round, "took": list(act.took),
+                            "elapsed_seconds": time.monotonic() - act.started,
                             "sent": [pack(e) for e in act.sent],
                             "out": [[name, pack_body(payload)] for name, payload in act.out],
                             "limited": act.limited, "calls": act.calls, "snaps": act.snaps,
@@ -85,6 +88,10 @@ class Recorder:
 
     def control(self, nodes: list[str], action: str, by: str | None) -> None:
         self.journal.write({"kind": "control", "nodes": nodes, "action": action, **({"by": by} if by else {})})
+
+    def review(self, kind, rejection) -> None:
+        self.journal.write({"kind": kind, "id": rejection.id, "node": rejection.by, "edge": rejection.feed.id,
+                            **({"answer": rejection.answer} if rejection.answer else {"reason": rejection.reason})})
 
     def change(self, under: str, graph: str, dropped: int) -> None:
         self.journal.write({"kind": "change", "from": under, "graph": graph, "dropped": dropped})
