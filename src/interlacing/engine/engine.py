@@ -1452,6 +1452,9 @@ class Engine:
                 if act is not None:
                     act.out.append((name, payload))
             envelopes = []
+            # Only an unchanged immutable body can use another edge's digest.
+            share_digest = len(feeds) > 1 and type(payload) is str
+            shared_digest = None
             for (feed, _), body in zip(feeds, bodies):
                 if feed.gone:                           # the graph changed while this was being sent
                     continue
@@ -1465,7 +1468,11 @@ class Engine:
                     stream = state.streams[feed.id] = Stream(feed.protocol, feed.port.port, keep=act is not None)
                     stream._put(body)
                     body = stream
-                envelope = sched.envelope(feed, body, round, cause)
+                if share_digest and body is payload:
+                    envelope = sched.envelope(feed, body, round, cause, body_digest=shared_digest)
+                    shared_digest = envelope.digest
+                else:
+                    envelope = sched.envelope(feed, body, round, cause)
                 if not feed.stream:
                     envelopes.append([feed.id, envelope.id])
                 self._post(feed, envelope, act)

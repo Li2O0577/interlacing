@@ -172,9 +172,12 @@ cd examples/data
 interlacing check release.json --allow steps
 interlacing run release.json --dir demo-run --allow steps --input topic=tides
 interlacing status --dir demo-run
+interlacing show --dir demo-run
 interlacing answer --dir demo-run --json '{"approved": true}'
 interlacing resume --dir demo-run
 ```
+
+用 `interlacing show --dir demo-run` 可以按输入端口查看已记录的投递。等待审批时，`publish.note` 已收到来自 `draft.note` 的投递，`publish.verdict` 还在等 `editor.answer` 的首次投递记录。命令仅读取保存的图和完整日志行，无需加载节点代码。正在运行时展示的也是已落盘的证据。拓扑发生变化时会标明展示的是初始图，并省略等待推断。
 
 `run/resume` 的退出码：`0` 完成，`1` 失败或被拒绝，`3` 等人，`4` 已停止。`status` 查运行状态和问题，`files` 查文件归属，`control pause|resume|stop|restart` 操作单个节点或管理树。目录内有 `graph.json`、`options.json`、`inputs.json`、`journal.jsonl`、`state.json` 和问题、答复、文件。继续整次运行用 `resume --dir`；让某个暂停节点恢复用 `control resume NODE --dir`。
 
