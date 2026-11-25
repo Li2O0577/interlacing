@@ -51,16 +51,18 @@ class Scheduler:
 
     refresh = staticmethod(refresh)
 
-    def envelope(self, feed: Feed, body: Any, round: int, cause: tuple, replaces: str = "") -> Envelope:
+    def envelope(self, feed: Feed, body: Any, round: int, cause: tuple, replaces: str = "",
+                 *, body_digest: str | None = None) -> Envelope:
         """The next envelope on ``feed``."""
         feed.sent += 1
-        if isinstance(body, Ref):
-            body_digest = body.digest
-        else:
-            try:
-                body_digest = digest(body)
-            except (TypeError, ValueError):
-                body_digest = ""    # not plain data: it can travel inside the process, but it has no content hash
+        if body_digest is None:
+            if isinstance(body, Ref):
+                body_digest = body.digest
+            else:
+                try:
+                    body_digest = digest(body)
+                except (TypeError, ValueError):
+                    body_digest = ""    # not plain data: it can travel inside the process, but it has no content hash
         self.envelopes += 1
         return Envelope(f"{feed.id}#{feed.sent}", feed.id, feed.sent, round, body, body_digest, cause, replaces)
 
