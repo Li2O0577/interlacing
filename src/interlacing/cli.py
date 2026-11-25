@@ -127,6 +127,7 @@ def _parser() -> argparse.ArgumentParser:
                                              "use (--allow), --processes and the rest are not given again.")
     resume.add_argument("--dir", required=True)
     resume.add_argument("--budget", **budget)
+    commands.add_parser("show", help="explain recorded input deliveries and first-activation waits").add_argument("--dir", required=True)
     commands.add_parser("status", help="say where a run stands").add_argument("--dir", required=True)
     control = commands.add_parser("control", help="pause, resume, stop or restart nodes of a run")
     control.add_argument("action", choices=["pause", "resume", "stop", "restart"])
@@ -222,6 +223,8 @@ def main(argv=None, out=None) -> int:
                 state = Run(args.dir).answer(json.loads(args.json) if args.json is not None else args.text, args.question)
             elif args.command == "control":
                 state = Run(args.dir).control(args.nodes, args.action, team=args.team)
+            elif args.command == "show":
+                state = Run(args.dir).show()
             elif args.command == "files":
                 state = {"files": Run(args.dir).files()}
             else:

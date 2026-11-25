@@ -2,6 +2,7 @@
 import io
 import json
 import subprocess
+from pathlib import Path
 import sys
 
 import pytest
@@ -169,3 +170,38 @@ def test_a_reader_that_goes_away_is_not_an_error(tmp_path):
 
 def shout(text):
     return text.upper()
+
+
+def test_show_explains_first_delivery_without_loading_nodes_or_repairing_journal(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.chdir(root / 'examples/data')
+    run = tmp_path / 'run'
+    assert call('run', 'release.json', '--allow', 'steps', '--dir', run, '--input', 'topic=tides')[0] == 3
+    path = run / 'journal.jsonl'
+    original = path.read_bytes()
+    path.write_bytes(original + b'{"kind":')
+    with monkeypatch.context() as context:
+        context.setattr(Run, '_engine', lambda self: pytest.fail('inspection constructed nodes'))
+        code, view = call('show', '--dir', run)
+    assert code == 0 and view['nodes']['editor']['questions'] == ['editor-1']
+    publish = view['nodes']['publish']
+    assert publish['awaiting_first_delivery_from'] == ['editor.answer']
+    assert publish['inputs']['note'][0]['delivery_recorded']
+    assert path.read_bytes() == original + b'{"kind":'
+    path.write_bytes(original)
+    assert call('answer', '--dir', run, '--json', '{"approved": true}')[0] == 0
+    assert 'questions' not in call('show', '--dir', run)[1]['nodes']['editor']
+    assert call('resume', '--dir', run)[0] == 0
+    done = call('show', '--dir', run)[1]
+    assert done['status'] == 'done' and done['nodes']['publish']['activation_recorded']
+    assert 'awaiting_first_delivery_from' not in done['nodes']['publish']
+
+
+def test_show_marks_changed_topology_and_reports_corrupt_complete_records(tmp_path):
+    run = Run.create(tmp_path, {'method': 'chain', 'nodes': [node('a', 'survey')]}, allow=[HERE])
+    assert run.show()['status'] == 'new'
+    journal = tmp_path / 'journal.jsonl'
+    journal.write_text('{"kind":"change"}\n', encoding='utf-8')
+    assert run.show()['topology'].startswith('initial graph')
+    journal.write_text('invalid\n', encoding='utf-8')
+    assert call('show', '--dir', tmp_path)[0] == 1
