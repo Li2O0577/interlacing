@@ -88,6 +88,9 @@ def explain(graph: dict, path: Path, status: str, questions: list, *, timeline: 
                      if key in record}
             if kind in ("challenged", "verdict"):
                 event["id"] = record["id"]
+            if record.get("fixed_out"):
+                event["revised_outputs"] = [{"output": name, "index": index}
+                                            for name, index, _ in record["fixed_out"]]
             if record.get("changes"):
                 event["operations"] = [op[0] for ops in record["changes"] for op in ops]
             events.append(event)

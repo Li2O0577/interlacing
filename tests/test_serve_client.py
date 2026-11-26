@@ -61,7 +61,7 @@ def test_the_reference_client_runs_a_graph_through_the_server(tmp_path):
             hello = await session.initialize()
             assert of(hello, 'serverInfo', 'server_info').name == 'interlacing' and hello.capabilities.tools is not None
             tools = {tool.name: tool for tool in (await session.list_tools()).tools}
-            assert sorted(tools) == ['answer', 'check', 'control', 'guide', 'resume', 'runs', 'start', 'status', 'stop']
+            assert sorted(tools) == ['answer', 'check', 'control', 'guide', 'resume', 'runs', 'show', 'start', 'status', 'stop']
             assert of(tools['start'], 'inputSchema', 'input_schema')['required'] == ['graph']
 
             checked = await session.call_tool('check', {'graph': REVIEWED})
@@ -70,6 +70,8 @@ def test_the_reference_client_runs_a_graph_through_the_server(tmp_path):
             started = await session.call_tool('start', {'graph': REVIEWED, 'inputs': {'site': '桥'}})
             state = told(started)
             assert not failed(started) and state['status'] == 'waiting' and state['questions'][0]['request'] == 'surveyed 桥'
+            view = told(await session.call_tool('show', {'run': state['run'], 'timeline': True}))
+            assert view['nodes']['editor']['questions'] and view['timeline']
             await session.call_tool('answer', {'run': state['run'], 'answer': {'approved': True}})
             resumed = await session.call_tool('resume', {'run': state['run']})
             assert told(resumed)['status'] == 'done'

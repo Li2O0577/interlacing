@@ -310,7 +310,7 @@ class Engine:
         ended = records[-1]["kind"] == "end" and not changed
         with self._lock:
             run_id, self._orphans, dropped = restore(records, self._wiring, self._sched, self._ledger, self._result,
-                                                     self._limited, self._remake)
+                                                     self._limited, self._remake, same_graph=not changed)
             self._id = self._id or run_id
             if not ended:
                 over = self._ledger.over()
@@ -1349,7 +1349,11 @@ class Engine:
             if act is not None:
                 assert self._recorder is not None
                 try:
-                    self._recorder.act(act)
+                    reading = state.reading
+                    if (state.node.on_correction != "rerun" or state.passive or ctx._saved or reading is None
+                            or tuple(reading.at) != act.took or state.streams):
+                        reading = None
+                    self._recorder.act(act, reading=reading)
                 except Exception as exc:   # noqa: BLE001 - something it sent is not plain data
                     self._fail(state, RunError(f"cannot be journaled: {exc}"))
                     return True
@@ -1565,13 +1569,7 @@ class Engine:
         reading = receiver.read_log.pop(old, None)
         bounded(receiver.read_log, new, reading)
         if reading is not None:
-            port, index = reading.at[old]
-            Engine._retook(reading.took.get(port), feed, old, envelope)
-            if index is None:
-                reading.inputs[port] = value
-            else:
-                reading.inputs[port][index] = value
-            reading.at = {new if id == old else id: where for id, where in reading.at.items()}
+            reading.update(feed, old, envelope, value)
 
     @staticmethod
     def _retook(took: list | None, feed: Feed, old: str, envelope: Envelope) -> None:
@@ -1624,6 +1622,7 @@ class Engine:
             envelope = sched.envelope(feed, body, round, cause, old)
             if act is not None:
                 act.sent.append(envelope)
+                act.redos.append(envelope.id)
             try:
                 value = self._checks.arrived(receiver, feed, body)
             except Exception as exc:   # noqa: BLE001 - a protocol's decode failed: the receiver fails, as it would

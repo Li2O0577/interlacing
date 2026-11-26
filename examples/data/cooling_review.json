@@ -1,0 +1,14 @@
+{
+  "nodes": [
+    {"id": "a", "kind": "function", "function": "steps.cooling", "context": true, "firing": "any", "inputs": [{"name": "steps", "required": false}, {"name": "decision", "required": false}], "outputs": ["reading"]},
+    {"id": "b2", "kind": "function", "function": "steps.cooling_report", "inputs": ["reading"], "outputs": ["report"]},
+    {"id": "b1", "kind": "human", "on_correction": "ignore"}
+  ],
+  "edges": [
+    {"from": "a.reading", "to": "b2.reading"},
+    {"from": "b2.report", "to": "b1.request"},
+    {"from": "b1.answer", "to": "a.decision", "back": true, "max_rounds": 1}
+  ],
+  "inputs": {"steps": "a.steps"},
+  "outputs": {"report": "b2.report"}
+}

@@ -243,6 +243,7 @@ Every node in a run has a switch: on, paused or stopped. Nodes can be switched o
 | Action | A node that is not running | A node that is running |
 |---|---|---|
 | `pause` | Does not start again | Finishes the current step and waits there, keeping its place and conversation |
+| `show` | `run`, `timeline` | Inspect recorded input deliveries and waits, optionally with a journal timeline |
 | `resume` | Starts as usual and handles the messages waiting for it | Continues from where it stopped |
 | `stop` | Does not start again; messages waiting for it are kept | Finishes the current step and ends this piece of work; the inputs it took are put back for later |
 | `restart` | Forgets what it remembers (`Node.reset`; for an agent, the conversation is cleared) and starts afresh | As before, and redoes the work with its original inputs |
@@ -348,7 +349,7 @@ Rules:
 
 - A node can correct only its own messages; the same message can be corrected several times, and the last one counts. Each node remembers its latest 1024 correctable messages; correcting an older one is an error.
 - Corrections are checked like ordinary messages and count against the edge's `max_rounds` the same way: once an edge is full, corrections are no longer sent.
-- Corrections are journaled. After a run is resumed, unread corrections are still in the mailbox; a message that was already read and is corrected afterwards is delivered as `tell` (the inputs needed to rerun an activation are not journaled).
+- New journals retain the output message IDs needed to rerun ordinary value inputs read at activation start. A recovered rerun updates derived outputs in place. Older journals and activations whose reads cannot be reconstructed (such as custom decoders, passive ports or mid-activation checkpoints) use the existing notification fallback.
 - In graph files write `"on_correction": "tell"`; it appears in the description only when it differs from the default for that kind of node.
 - Resident agents correct with the `correct(id, content)` tool; `send_<output>` gives back ids like `sent, as say#2`.
 - Messages on stream and call edges cannot be corrected. Remote nodes (`RemoteNode`) can correct their own messages too: the remote `ctx.emit` returns the remote side's own id, `ctx.correct` uses it, and the local side maps it to the id in the run.
@@ -774,7 +775,7 @@ Tool calls are answered in parallel, so a long run does not block questions abou
 - The run directory lock exists only at the level of `Run`, the command line and the MCP server; when using `Engine` and `Journal` directly, one journal file must not be used by two engines at once. On Windows, locks left by dead processes are not taken over automatically.
 - Tests run on Linux, macOS and Windows. On Windows, `\r\n` in external programs' output becomes `\n`; when the console is not UTF-8, non-ASCII characters in the command line's JSON output are escaped.
 - The budget is checked at the moment a node reports usage, so it can be exceeded by one call's worth; nodes that report no usage are not bound by it.
-- The MCP server has only the stdio transport. Tool calls are answered in parallel; a client cancelling a call (`notifications/cancelled`) stops the run that call was waiting on; when the client disconnects, runs still in progress are stopped at a point where they can continue. It has been exercised in tests by the reference client (the `mcp` package), but not yet connected to a desktop application.
+- The MCP server has only the stdio transport. Tool calls are answered in parallel; a client cancelling a call (`notifications/cancelled`) stops the run that call was waiting on; when the client disconnects, runs still in progress are stopped at a point where they can continue. The reference client (the `mcp` package) exercises the server in CI. The MCP Inspector graphical client has also completed the cooling review.
 - A synchronous node that times out in the engine's own process is only abandoned: threads cannot be killed, so it ends only when it returns by itself; coroutine nodes are cancelled. `ProcessNode` and `IsolatedNode` are exceptions: as soon as the run stops (including on a timeout), their processes are killed. Long-running nodes you write should check `ctx.stopping()` regularly, or go into an `IsolatedNode`.
 - `Pool` places are not reclaimed within a run (see "Choosing a way to put a graph inside a graph" for why). Nodes added during the run with `ctx.change` are rebuilt from their descriptions by `rebuild` on resume, so they cannot be blocks or `GraphNode`s.
 - Checks happen only when a payload is sent and when it arrives; a file changed between the two checks is noticed only at the next arrival. With `hash=False`, only sizes are compared.

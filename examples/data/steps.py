@@ -25,3 +25,18 @@ def lead(ctx, task=None, reply=None):
 
 _WAITING: set = set()
 _REPORTS: dict = {}
+
+
+def cooling(ctx, steps=None, decision=None):
+    """One experiment per run. The reviewer can correct the exported units afterwards."""
+    if decision is not None:
+        if decision["units"] == "percent":
+            ctx.correct("reading#1", decision["reading"] / 100)
+        return
+    ctx.use(simulations=1)
+    fraction = (1 - 1 / steps) ** steps
+    ctx.emit("reading", 100 * fraction)
+
+
+def cooling_report(reading):
+    return round(reading, 4)
