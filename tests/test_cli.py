@@ -227,19 +227,17 @@ def test_show_replays_dynamic_topology_and_formats(tmp_path, monkeypatch):
         assert out.getvalue().startswith(header) and 'p1 to x (value)' in out.getvalue()
 
 
-def test_show_forgets_removed_members_and_their_delivery_evidence(tmp_path):
-    from interlacing.inspection import explain
+def test_show_forgets_removed_members_and_their_delivery_evidence():
+    from interlacing.inspection import explain_records
     def part(name):
         return {'id': name, 'firing': 'all', 'inputs': [{'name': 'x', 'required': True}], 'outputs': []}
     edge = {'id': 'e', 'from': 'a.y', 'to': 'b.x', 'protocol': 'value'}
     graph = {'nodes': [part('a'), part('b')], 'edges': [edge], 'inputs': {}, 'outputs': {'old': 'b.y'},
              'manages': {'a': ['b']}}
-    path = tmp_path / 'journal'
     records = [{'kind': 'act', 'node': 'a', 'sent': [['e', 1]]},
                {'kind': 'act', 'node': 'a', 'changes': [[['remove', 'b'], ['add', part('c')],
                  ['connect', dict(edge, to='c.x')], ['manage', 'a', ['c']], ['output', 'new', 'c.y']]]}]
-    path.write_text(''.join(json.dumps(r) + '\n' for r in records))
-    view = explain(graph, path, 'waiting', [], timeline=True)
+    view = explain_records(graph, iter(records), 'waiting', [], timeline=True)
     assert set(view['nodes']) == {'a', 'c'} and view['outputs'] == {'new': 'c.y'}
     assert view['managers'] == {'c': 'a'}
     assert view['nodes']['c']['awaiting_first_delivery_from'] == ['a.y']

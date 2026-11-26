@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -88,6 +89,26 @@ class Journal:
                 break
             good += len(line)
         return records
+
+    def inspect(self) -> Iterator[dict]:
+        """Read complete records up to the size observed at open, without repairing the journal."""
+        try:
+            file = self.path.open("rb")
+        except FileNotFoundError:
+            return
+        with file:
+            remaining = os.fstat(file.fileno()).st_size
+            number = 0
+            while remaining:
+                line = file.readline(remaining)
+                if not line.endswith(b"\n"):
+                    return
+                remaining -= len(line)
+                number += 1
+                try:
+                    yield json.loads(line)
+                except ValueError as error:
+                    raise JournalError(f"{self.path}: line {number} is damaged: {error}") from None
 
     def write(self, record: dict) -> None:
         line = json.dumps(record, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n"

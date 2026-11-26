@@ -365,6 +365,22 @@ def test_a_builder_made_from_a_graph_can_take_parts_out():
             call(GraphBuilder.of(graph))
 
 
+def test_inspection_reads_only_the_complete_prefix_present_at_open(tmp_path):
+    path = tmp_path / 'run.jsonl'
+    before = b'{"kind":"run"}\n{"kind":"act"'
+    after = b'}\n{"kind":"end"}\n'
+    path.write_bytes(before)
+    journal = Journal(path)
+
+    records = journal.inspect()
+    assert next(records) == {'kind': 'run'}
+    with path.open('ab') as writer:
+        writer.write(after)
+    assert list(records) == []
+    assert path.read_bytes() == before + after
+    assert list(journal.inspect()) == [{'kind': 'run'}, {'kind': 'act'}, {'kind': 'end'}]
+
+
 def test_a_line_cut_short_is_dropped_and_a_damaged_one_is_refused(tmp_path):
     path = tmp_path / 'run.jsonl'
     second = Flaky(double)

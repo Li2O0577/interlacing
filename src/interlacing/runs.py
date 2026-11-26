@@ -459,12 +459,13 @@ class Run:
 
     def show(self, *, timeline: bool = False) -> dict:
         """Inspect the saved graph and journal without constructing or running nodes."""
-        from .inspection import explain
+        from .inspection import explain_records
         self._held()
         state = _read(self.directory / "state.json", {})
         status = RUNNING if _holder(self.directory) else state.get("status", NEW)
-        view = explain(_read(self.directory / "graph.json"), self.directory / "journal.jsonl",
-                       status, self.questions(), timeline=timeline)
+        records = Journal(self.directory / "journal.jsonl").inspect()
+        view = explain_records(_read(self.directory / "graph.json"), records,
+                               status, self.questions(), timeline=timeline)
         if status == FAILED:
             view["failure"] = {k: state[k] for k in ("node", "error") if k in state}
         return view

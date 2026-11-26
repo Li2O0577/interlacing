@@ -2,34 +2,12 @@
 from __future__ import annotations
 
 import json
-import os
-from collections.abc import Iterator
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 
-from .engine.journal import JournalError
+from .engine.journal import Journal, JournalError
 from .engine.wiring import INPUT
-
-
-def _records(path: Path) -> Iterator[dict]:
-    try:
-        file = path.open("rb")
-    except FileNotFoundError:
-        return
-    with file:
-        # A producer can still be appending. Inspect only the complete prefix present at open.
-        remaining = os.fstat(file.fileno()).st_size
-        number = 0
-        while remaining:
-            line = file.readline(remaining)
-            if not line.endswith(b"\n"):
-                return
-            remaining -= len(line)
-            number += 1
-            try:
-                yield json.loads(line)
-            except ValueError as error:
-                raise JournalError(f"{path}: line {number} is damaged: {error}") from None
 
 
 def _apply(ops, nodes, edges, inputs, outputs, sent, activated, managers):
@@ -70,6 +48,11 @@ def _apply(ops, nodes, edges, inputs, outputs, sent, activated, managers):
 
 
 def explain(graph: dict, path: Path, status: str, questions: list, *, timeline: bool = False) -> dict:
+    """Explain a run from a JSONL journal path."""
+    return explain_records(graph, Journal(path).inspect(), status, questions, timeline=timeline)
+
+
+def explain_records(graph: dict, records: Iterable[dict], status: str, questions: list, *, timeline: bool = False) -> dict:
     """First-activation dependencies in the saved graph, with historical delivery evidence."""
     sent: set[str] = set()
     activated: set[str] = set()
@@ -80,7 +63,7 @@ def explain(graph: dict, path: Path, status: str, questions: list, *, timeline: 
     inputs_map, outputs = dict(graph["inputs"]), dict(graph["outputs"])
     managers = {member: manager for manager, team in graph.get("manages", {}).items() for member in team}
     events = []
-    for record in _records(path):
+    for record in records:
         kind = record["kind"]
         if timeline:
             event = {key: record[key] for key in ("kind", "node", "round", "open", "elapsed_seconds", "amounts",
