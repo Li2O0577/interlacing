@@ -75,12 +75,12 @@ class Recorder:
                     "sent": [pack(e) for e in sent], **({"durable": True} if self.durable is not None else {})})
 
     def act(self, act: Act, open: bool = False, reading: Reading | None = None,
-            children: Iterable[JournalBackend] = ()) -> None:
+            children: Iterable[JournalBackend] = (), *, stale: bool = False) -> None:
         """What an activation did. ``open``: it saved its progress and goes on (``ctx.commit``)."""
         child_history = []
         for child in children:
             events = [history_record(record, seq) for seq, record in enumerate(child.read(), 1)
-                      if record["kind"] in ("run", "act", "deliver")]
+                      if record["kind"] in ("run", "act", "deliver", "correct")]
             if events:
                 child_history.append(events)
         self.write({"kind": "act", "node": act.node, "round": act.round, "took": list(act.took),
@@ -99,7 +99,8 @@ class Recorder:
                      **({"fixed_out": [[name, index, pack_body(payload)] for name, index, payload in act.fixed_out]}
                         if act.fixed_out else {}),
                      **({"child_history": child_history} if child_history else {}),
-                     **({"open": True} if open else {})})
+                     **({"open": True} if open else {}),
+                     **({"stale": True} if stale else {})})
 
     def use(self, node: str, round: int, amounts: Mapping[str, float]) -> None:
         self.write({"kind": "use", "node": node, "round": round, "amounts": dict(amounts)})

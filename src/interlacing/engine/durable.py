@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from ..base import NodeError, canonical
 from .journal import pack_body, unpack_body
 from .recorder import _envelope
+from .rework import Rework
+from .sqlite import SQLiteJournal
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -33,6 +35,18 @@ class DurableState:
             "pending": {}, "mail": {}, "counters": {}, "emitted": {}, "outputs": {}, "snaps": {},
             "limited": {}, "used": {}, "once": {}, "problems": [], "envelopes": 0,
         }
+        self.rework = Rework(self.data.setdefault("rework", {
+            "messages": {}, "deliveries": {}, "readings": {}, "readers": {}, "waiting": {},
+        }))
+
+    @classmethod
+    def load(cls, journal: SQLiteJournal, *, at: int | None = None) -> tuple[int | None, DurableState]:
+        checkpoint, records = journal.recovery(at=at, required="rework")
+        position = checkpoint["seq"] if checkpoint is not None else None
+        state = cls(checkpoint)
+        for record in records:
+            state.apply(record)
+        return position, state
 
     @property
     def seq(self) -> int:
@@ -62,27 +76,53 @@ class DurableState:
             node = record["node"]
             data["rounds"][node] = record["round"]
             self.pending[node] = {"round": record["round"], "took": record["took"], "ops": [], "resumed": False}
+            self.rework.bind(record)
+            if "redo" in record:
+                self.pending[node].update(redo=record["redo"], redo_outputs=record["redo_outputs"])
         elif kind == "deliver":
-            self.pending[record["node"]]["ops"].append({key: record[key] for key in ("kind", "port", "key", "token")})
+            pending = self.pending[record["node"]]
+            pending["ops"].append({key: record[key] for key in ("kind", "port", "key", "token")})
             self._deliver(record["sent"])
+            self.rework.emit(record, pending)
             counters = data["emitted"].setdefault(record["node"], {})
             counters[record["port"]] = int(record["token"].rsplit("#", 1)[1])
             for name, _, body in record["outputs"]:
                 data["outputs"].setdefault(name, []).append(body)
             data["limited"].update(dict.fromkeys(record["limited"]))
+        elif kind == "correct":
+            self.pending[record["node"]]["ops"].append({key: record[key] for key in ("kind", "key", "token")})
+            self.rework.revise(record)
+            for name, index, body in record["outputs"]:
+                data["outputs"][name][index] = body
+            for packed, route in zip(record["sent"], record["routes"]):
+                edge, seq = packed[:2]
+                data["counters"][edge] = seq
+                data["envelopes"] += 1
+                if route == "unread":
+                    old, new = packed[5], f"{edge}#{seq}"
+                    data["mail"] = {new if id == old else id: packed if id == old else body
+                                    for id, body in data["mail"].items()}
+                elif route == "tell":
+                    data["mail"][f"{edge}#{seq}"] = packed
+            data["limited"].update(dict.fromkeys(record["limited"]))
         elif kind == "topology":
             operations = record["operations"]
             data["changes"].append(operations)
-            self.pending[record["node"]]["ops"].append({"kind": kind, "operations": operations})
+            node = record["node"]
+            self.pending[node]["ops"].append({"kind": kind, "operations": operations})
+            self.rework.reading(node, self.pending[node])["replayable"] = False
         elif kind == "act":
             node = record["node"]
             pending = self.pending[node]
-            for id in pending["took"]:
-                data["mail"].pop(id, None)
-            data["snaps"].update(record["snaps"])
-            if node not in record["snaps"]:
-                data["snaps"].pop(node, None)
+            if "redo" not in pending:
+                for id in pending["took"]:
+                    data["mail"].pop(id, None)
+            if not record.get("stale"):
+                data["snaps"].update(record["snaps"])
+                if node not in record["snaps"]:
+                    data["snaps"].pop(node, None)
             data["problems"].extend(record.get("problems", ()))
+            self.rework.settle(record, pending)
             if record.get("open"):
                 pending.update(took=[], ops=[], resumed=True)
             else:
@@ -98,7 +138,7 @@ class DurableState:
     def _deliver(self, envelopes: list) -> None:
         for packed in envelopes:
             edge, seq = packed[:2]
-            self.data["mail"][f"{edge}#{seq}"] = packed
+            self.data["mail"][self.rework.store(packed)] = packed
             self.data["counters"][edge] = seq
             self.data["envelopes"] += 1
 
@@ -116,6 +156,7 @@ class DurableState:
             if id in data["snaps"]:
                 state.node.restore(data["snaps"][id])
             state.bound = id in self.pending
+            state.rework = id in self.rework.waiting
         for packed in data["mail"].values():
             feed = engine._feeds[packed[0]]
             engine._sched.place(feed, _envelope(feed, packed))

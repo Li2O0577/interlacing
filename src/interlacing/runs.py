@@ -524,12 +524,7 @@ class Run:
             raise SpecError("an event position must be an integer")
         if not journal.path.exists():
             raise SpecError("the run has no committed events")
-        checkpoint, records = journal.recovery(at=at)
-        position = checkpoint["seq"] if checkpoint is not None else None
-        state = DurableState(checkpoint)
-        for record in records:
-            state.apply(record)
-        return position, state
+        return DurableState.load(journal, at=at)
 
     def fork(self, directory, *, at: int, inputs: Mapping[str, Any] | None = None,
              execute: bool = False) -> Run:
@@ -627,7 +622,7 @@ class Run:
                                for name, bodies in data["outputs"].items()},
                     "pending": {node: {"round": item["round"], "took": item["took"]}
                                 for node, item in history.pending.items()},
-                    "forkable": not history.pending, "ended": data["ended"]}
+                    "rework": history.rework.jobs(), "forkable": not history.pending, "ended": data["ended"]}
         state = _read(self.directory / "state.json", {})
         status = RUNNING if _holder(self.directory) else state.get("status", NEW)
         view = explain_records(graph, self._journal(options).inspect(), status, self.questions(), timeline=timeline)

@@ -34,7 +34,7 @@ class Scheduler:
             can = True                       # it goes on from the progress it saved, with or without new messages
         elif state.reviews.pending:
             can = True                       # what it sent was rejected: it is to answer
-        elif state.redo:
+        elif state.redo or state.rework:
             can = True                       # something an earlier activation read was corrected: it runs again
         elif state.any:
             arrivals = state.arrivals
@@ -210,3 +210,17 @@ class Scheduler:
             if values:
                 inputs[port.port.name] = values if port.port.many else values[0]
         return inputs, tuple(cause), took
+
+    @staticmethod
+    def retake(state: State, envelopes: list[tuple[Feed, Envelope]], read: Read) -> dict[str, Any]:
+        """Read the precise versions bound to durable rework without taking new mail."""
+        inputs: dict[str, Any] = {}
+        for feed, envelope in envelopes:
+            port = feed.port.port
+            value = read(feed, envelope.body)
+            if port.many:
+                inputs.setdefault(port.name, []).append(value)
+            else:
+                inputs[port.name] = value
+            state.took_on.setdefault(port.name, []).append((feed, envelope))
+        return inputs

@@ -166,7 +166,7 @@ class State:
                  "opened", "round", "outs", "calls", "passive", "streams", "called", "since", "time_limit", "rejected", "delivered",
                  "inner", "status", "halt", "holding", "paused_at", "waiting", "late", "resuming", "resumed", "opening",
                  "emitted", "sent_log", "read_log", "redo", "reading", "redoing", "replaced",
-                 "reviews", "took_on", "failures", "failures_shown", "bound", "replay")
+                 "reviews", "took_on", "failures", "failures_shown", "bound", "replay", "rework")
 
     def __init__(self, node: Node):
         self.node = node
@@ -209,6 +209,7 @@ class State:
         self.failures_shown = 0                   # how many of those its running activation has been woken for
         self.bound = False                        # a durable activation can continue without new inputs
         self.replay: deque[dict] = deque()
+        self.rework = False                      # a durable correction has queued a reading for this node
 
     def begin(self) -> None:
         """A new activation starts: forget what the last one did."""

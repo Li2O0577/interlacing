@@ -180,7 +180,7 @@ def history_record(record: dict, seq: int) -> dict:
     event = {"seq": seq, "kind": kind, "schema_version": record.get("schema_version", 0)}
     if kind == "run":
         event.update(run_id=record.get("id"), scope_id=record.get("scope_id"))
-    if kind in ("run", "fork", "act", "deliver"):
+    if kind in ("run", "fork", "act", "deliver", "correct"):
         event["deliveries"] = [
             [f"{item[0]}#{item[1]}", item[5] if len(item) > 5 else None]
             for item in record.get("sent", ())
@@ -192,10 +192,17 @@ def history_record(record: dict, seq: int) -> dict:
                      revised_outputs=[[name, index] for name, index, _ in record.get("fixed_out", ())])
         if record.get("child_history"):
             event["child_history"] = record["child_history"]
-    if kind == "deliver":
+        if record.get("stale"):
+            event["stale"] = True
+    if kind in ("deliver", "correct"):
         outputs = record["outputs"]
-        event["outputs"] = [name for name, _, _ in outputs]
-        event["output_indices"] = [index for _, index, _ in outputs]
+        if kind == "deliver":
+            event["outputs"] = [name for name, _, _ in outputs]
+            event["output_indices"] = [index for _, index, _ in outputs]
+            event["message_version"] = 1
+        else:
+            event["revised_outputs"] = [[name, index] for name, index, _ in outputs]
+            event["message_version"] = record["version"]
         event["emits"] = [[record["token"], record["port"],
                            [[packed[0], delivery] for packed, (delivery, _) in zip(record["sent"], event["deliveries"])],
                            [[name, index] for name, index, _ in outputs]]]

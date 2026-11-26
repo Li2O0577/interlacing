@@ -39,7 +39,7 @@ class SQLiteJournal:
 
     def _version(self, connection: sqlite3.Connection) -> int:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in (0, 1, 2, 3):
+        if version not in (0, 1, 2, 3, 4):
             raise JournalError(f"{self.path}: unsupported SQLite journal version {version}")
         return version
 
@@ -75,7 +75,8 @@ class SQLiteJournal:
                         connection.execute("INSERT INTO retained_checkpoints SELECT scope, seq, state FROM checkpoints")
                         connection.execute("DROP TABLE checkpoints")
                     connection.execute("ALTER TABLE retained_checkpoints RENAME TO checkpoints")
-                    connection.execute("PRAGMA user_version = 3")
+                if version < 4 and self.durable:
+                    connection.execute("PRAGMA user_version = 4")
                 yield connection
 
     def inspect(self, *, through: int = _LAST_POSITION) -> Generator[dict, None, None]:
@@ -123,7 +124,7 @@ class SQLiteJournal:
                 positions = [seq for seq, in rows]
             return self._tail(connection), positions
 
-    def recovery(self, *, at: int | None = None) -> tuple[dict | None, list[dict]]:
+    def recovery(self, *, at: int | None = None, required: str | None = None) -> tuple[dict | None, list[dict]]:
         """Read the latest recovery state and later events from one SQLite snapshot."""
         with self._connection() as connection:
             connection.execute("BEGIN")
@@ -140,12 +141,14 @@ class SQLiteJournal:
                 row = connection.execute("SELECT seq, state FROM checkpoints WHERE scope = ? AND seq <= ? "
                                          "ORDER BY seq DESC LIMIT 1", (self._key, through)).fetchone()
             seq, state = row if row is not None else (0, None)
-            records = connection.execute("SELECT record FROM run_events WHERE scope = ? AND seq > ? AND seq <= ? ORDER BY seq",
-                                         (self._key, seq, through))
             try:
                 checkpoint = json.loads(state) if state is not None else None
                 if checkpoint is not None and checkpoint.get("seq") != seq:
                     raise ValueError("checkpoint position does not match its state")
+                if checkpoint is not None and required is not None and required not in checkpoint:
+                    seq, checkpoint = 0, None  # rebuild an index introduced after this checkpoint
+                records = connection.execute("SELECT record FROM run_events WHERE scope = ? AND seq > ? AND seq <= ? "
+                                             "ORDER BY seq", (self._key, seq, through))
                 return checkpoint, [json.loads(record) for record, in records]
             except (AttributeError, ValueError) as error:
                 raise JournalError(f"{self.path}: invalid recovery data: {error}") from error

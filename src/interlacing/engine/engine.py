@@ -113,7 +113,8 @@ from .context import RunContext
 from .durable import DurableState, copy_body, payload_key
 from .journal import JournalBackend, pack, pack_body, unpack_body
 from .ledger import Ledger, amounts
-from .recorder import Act, Recorder, restore, under
+from .recorder import Act, Recorder, _envelope, restore, under
+from .rework import Superseded
 from .result import OverBudget, Result, RunError
 from .scheduler import Scheduler
 from .sqlite import SQLiteJournal
@@ -321,10 +322,7 @@ class Engine:
         if change:
             raise RunError("resume the original durable graph before changing it through ctx.change")
         assert isinstance(recorder.journal, SQLiteJournal)
-        checkpoint, records = recorder.journal.recovery()
-        restored = DurableState(checkpoint)
-        for record in records:
-            restored.apply(record)
+        _, restored = DurableState.load(recorder.journal)
         start = restored.data["run"]
         if start is None:
             raise RunError("the journal is empty: there is nothing to resume")
@@ -570,6 +568,9 @@ class Engine:
                 raise NodeError(f"{node.id} can save progress only in an activation of its own")
             if ctx._cut or self._over:
                 return False
+            self._check_current(state)
+            if self._is_rework(state):
+                raise NodeError("a rework activation cannot save intermediate progress")
             if state.replay:
                 raise NodeError("durable replay still has committed operations to reproduce")
             ctx._saved = True
@@ -983,7 +984,7 @@ class Engine:
         """Nodes whose switch is off and that still have something waiting for them."""
         held = {}
         for id, state in self._states.items():
-            if state.status != ACTIVE and (state.running or state.bound or any(
+            if state.status != ACTIVE and (state.running or state.bound or state.rework or any(
                     feed.box for port in state.ports.values() for feed in (*port.forward, *port.back))):
                 held[id] = state.status
         return held
@@ -1260,7 +1261,8 @@ class Engine:
         could not be read: it has failed."""
         sched, checks = self._sched, self._checks
         state = sched.ready.popleft()
-        pending = self._durable.pending.get(state.node.id) if self._durable is not None else None
+        durable, node = self._durable, state.node.id
+        pending = durable.pending.get(node) if durable is not None else None
         if pending is not None:
             state.round = pending["round"] - 1
         state.begin()
@@ -1269,23 +1271,40 @@ class Engine:
             self._lock.notify_all()          # the watcher must learn that a clock has started
         self._active += 1
         try:
-            bound: list[Feed] | None = None
+            def read(feed, body):
+                return checks.arrived(state, feed, copy_body(body) if durable is not None else body)
+
+            binding = pending
             if pending is not None:
                 state.resuming, state.resumed = False, pending["resumed"]
                 state.replay = deque(pending["ops"])
-                bound = []
-                for id in pending["took"]:
-                    feed = self._feeds[id.rsplit("#", 1)[0]]
-                    if not feed.box or feed.box[0].id != id or feed.port.state is not state:
-                        raise NodeError(f"cannot recover bound input {id!r}")
-                    bound.append(feed)
-            def read(feed, body):
-                return checks.arrived(state, feed, copy_body(body) if self._durable is not None else body)
-
-            taken, cause, took = sched.take(state, read, bound=bound)
-            if self._durable is not None and pending is None:
+            if pending is None and durable is not None and state.rework:
+                redo = next(iter(durable.rework.waiting[node]))
+                reading = durable.rework.readings[node][redo]
+                binding = {"redo": redo, "took": reading["took"], "redo_outputs": reading["emits"]}
+            if durable is not None and binding is not None and "redo" in binding:
+                took = cause = tuple(binding["took"])
+                envelopes = []
+                for id in took:
+                    packed = durable.rework.deliveries[id]
+                    feed = self._feeds[packed[0]]
+                    envelopes.append((feed, _envelope(feed, packed)))
+                taken = sched.retake(state, envelopes, read)
+                state.redoing = {port: deque(tokens) for port, tokens in binding["redo_outputs"].items()}
+            else:
+                bound: list[Feed] | None = None
+                if pending is not None:
+                    bound = []
+                    for id in pending["took"]:
+                        feed = self._feeds[id.rsplit("#", 1)[0]]
+                        if not feed.box or feed.box[0].id != id or feed.port.state is not state:
+                            raise NodeError(f"cannot recover bound input {id!r}")
+                        bound.append(feed)
+                taken, cause, took = sched.take(state, read, bound=bound)
+            if durable is not None and pending is None:
                 assert self._recorder is not None
-                self._recorder.write({"kind": "bind", "node": state.node.id, "round": state.round, "took": list(took)})
+                self._recorder.write({"kind": "bind", "node": node, "round": state.round, "took": list(took),
+                                      **(binding or {})})
                 state.bound = True
         except Exception as exc:   # noqa: BLE001 - a protocol's decode failed
             self._fail(state, exc)
@@ -1304,6 +1323,9 @@ class Engine:
         return ctx, act
 
     def _activate(self, state: State, ctx: RunContext, act: Act | None, taken: dict, cause: tuple) -> None:
+        if self._durable is not None:
+            with self._lock:
+                self._check_current(state)
         node = state.node
         if not state.opened:
             state.opened = True
@@ -1330,6 +1352,9 @@ class Engine:
             self._snap(node, ctx._act)
 
     async def _aactivate(self, state: State, ctx: RunContext, act: Act | None, taken: dict, cause: tuple) -> None:
+        if self._durable is not None:
+            with self._lock:
+                self._check_current(state)
         node = state.node
         if not state.opened:
             state.opened = True
@@ -1379,6 +1404,10 @@ class Engine:
         when the engine has already returned and what the activation did is thrown away."""
         lock, sched, node = self._lock, self._sched, state.node
         act = ctx._act                  # the record it is writing now: a new one after each commit
+        if self._durable is not None:
+            with lock:
+                if not self._over and self._error is None and not self._inputs_current(state):
+                    return self._discard_stale(state, act)
         if failure is None and self._durable is not None and self._error is not None and self._error.node == node.id:
             failure = self._error
         if state.reviews.open:                  # rejections it took up and did not answer: Node.challenged answers them
@@ -1445,6 +1474,8 @@ class Engine:
         with lock:
             if self._over:             # it overran and the engine has gone: what it did is thrown away
                 return False
+            if self._durable is not None and not self._inputs_current(state):
+                return self._discard_stale(state, act)
             self._end_streams(state)
             if act is not None:
                 assert self._recorder is not None
@@ -1457,22 +1488,44 @@ class Engine:
                         reading = None
                     self._recorder.act(act, reading=reading, children=state.inner.values())
                     state.bound = False
+                    if self._durable is not None:
+                        state.rework = node.id in self._durable.rework.waiting
                 except Exception as exc:   # noqa: BLE001 - something it sent is not plain data
                     self._fail(state, RunError(f"cannot be journaled: {exc}"))
                     return True
                 for journal in state.inner.values():
                     journal.discard()         # the activation is on record: its child journals are no longer needed
-            state.running = False
-            self._active -= 1
-            if state.halt == "restart":    # it finished before it looked: what it did stands, what it holds goes
-                state.node.reset()
-            state.halt = False
-            sched.consider(state)
-            if not sched.ready and not self._active:
-                lock.notify_all()
-            elif sched.ready:
-                lock.notify()
+            self._release(state)
         return True
+
+    def _discard_stale(self, state: State, act: Act | None) -> bool:
+        """End a superseded physical activation while leaving its logical reading ready for rework."""
+        assert self._durable is not None and self._recorder is not None and act is not None
+        try:
+            snapshot = self._durable.data["snaps"].get(state.node.id)
+            if snapshot is not None:
+                state.node.restore(snapshot)
+            self._recorder.act(Act(act.node, act.round, act.took), children=state.inner.values(), stale=True)
+            for journal in state.inner.values():
+                journal.discard()
+        except Exception as exc:
+            self._fail(state, exc)
+            return True
+        state.bound = False
+        state.replay.clear()
+        self._release(state)
+        return True
+
+    def _release(self, state: State) -> None:
+        sched = self._sched
+        state.running = False
+        self._active -= 1
+        if state.halt == "restart":    # it finished before it looked: what it did stands, what it holds goes
+            state.node.reset()
+        state.halt = False
+        sched.consider(state)
+        if sched.ready or not self._active:
+            self._lock.notify_all()
 
     def _tell(self, event: str, **about) -> None:
         observe = self._observe
@@ -1531,6 +1584,8 @@ class Engine:
 
     def _emit(self, state: State, port: str, payload: Any, round: int, cause: tuple, act: Act | None = None) -> str:
         if self._durable is not None:
+            if state.redoing and state.redoing.get(port):
+                return self._committed_correct(state, state.redoing[port].popleft(), payload, round, cause, act)
             return self._committed_emit(state, port, payload, round, cause, act)
         if state.redoing and state.redoing.get(port):     # run again: it corrects what it sent the first time
             name = state.redoing[port].popleft()
@@ -1609,6 +1664,20 @@ class Engine:
         self._sched.stopped = True
         self._lock.notify_all()
 
+    def _inputs_current(self, state: State) -> bool:
+        if self._durable is None:
+            return True
+        node = state.node.id
+        pending = self._durable.pending.get(node)
+        return pending is None or self._durable.rework.current(node, pending)
+
+    def _check_current(self, state: State) -> None:
+        if not self._inputs_current(state):
+            raise Superseded("a bound input was revised")
+
+    def _is_rework(self, state: State) -> bool:
+        return self._durable is not None and "redo" in self._durable.pending.get(state.node.id, {})
+
     @staticmethod
     def _replayed(state: State, operation: dict) -> dict | None:
         if not state.replay:
@@ -1631,6 +1700,7 @@ class Engine:
         with self._lock:
             if self._over or self._sched.stopped:
                 raise NodeError("the run is stopping")
+            self._check_current(state)
             replayed = self._replayed(state, {"kind": "deliver", "port": port, "key": key})
             if replayed is not None:
                 state.delivered = True
@@ -1639,6 +1709,7 @@ class Engine:
         with self._lock:
             if self._over or self._sched.stopped:
                 raise NodeError("the run is stopping")
+            self._check_current(state)
             count = state.emitted.get(port, 0) + 1
             token = f"{port}#{count}"
             outputs = [[name, len(self._result.outputs[name]), pack_body(copy_body(payload))] for name in names]
@@ -1700,17 +1771,16 @@ class Engine:
             self._sched.place(feed, envelope)
 
     def _wake(self) -> None:
-        if self._waiters:
-            self._lock.notify_all()             # one waiting for a message may have it now
-        elif self._sched.ready:
-            self._lock.notify()
+        if self._waiters or self._sched.ready:
+            # The driver also waits on this condition, so waking just one can leave workers asleep.
+            self._lock.notify_all()
 
     def _correct(self, state: State, name: str, payload: Any, round: int, cause: tuple, act: Act | None) -> str:
         """``ctx.correct``: ``payload`` takes the place of message ``name`` this node sent (see
         ``Context.correct``). Where it waits unread it is replaced; where it was read, the receiver's
         ``on_correction`` says what follows; a graph output it reached is changed."""
         if self._durable is not None:
-            raise NodeError("message correction requires the standard journal mode")
+            return self._committed_correct(state, name, payload, round, cause, act)
         node = state.node
         sent = state.sent_log.get(name)
         if sent is None:
@@ -1742,6 +1812,84 @@ class Engine:
                 act.emits.append([name, port, envelopes, sent.outputs])
             self._wake()
         return name
+
+    def _committed_correct(self, state: State, token: str, payload: Any, round: int,
+                           cause: tuple, act: Act | None) -> str:
+        assert self._durable is not None
+        if act is None:
+            raise NodeError("durable correction requires an active journaled node")
+        durable, node = self._durable, state.node
+        key = payload_key(payload)
+        operation = {"kind": "correct", "token": token, "key": key}
+        with self._lock:
+            self._check_current(state)
+            if self._replayed(state, operation) is not None:
+                state.delivered = True
+                return token
+            message = durable.rework.messages.get(node.id, {}).get(token)
+            if message is None:
+                raise NodeError(f"{node.id} has sent no message {token!r} it can still correct")
+            port = message["port"]
+            feeds = [(self._feeds[id], node.outputs[port]) for id in message["envelopes"]]
+        changed = message["key"] != key
+        bodies = self._bodies(state, port, payload, feeds, round, act) if changed else []
+        with self._lock:
+            if self._over or self._sched.stopped:
+                raise NodeError("the run is stopping")
+            self._check_current(state)
+            outputs = [[name, index, pack_body(copy_body(payload))] for name, index in message["outputs"]] if changed else []
+            deliveries: list[tuple[Feed, Envelope, str]] = []
+            limited: list[str] = []
+            for (feed, _), body in zip(feeds, bodies):
+                old = message["envelopes"][feed.id]
+                route = self._correction_route(feed, old)
+                if route == "ignore":
+                    continue
+                if feed.limit is not None and feed.sent >= feed.limit:
+                    limited.append(feed.id)
+                    continue
+                envelope = self._sched.envelope(feed, copy_body(body), round, cause, old)
+                deliveries.append((feed, envelope, route))
+            self._write_durable(state, {**operation, "node": node.id, "round": round, "port": port,
+                                       "version": message["version"] + int(changed), "noop": not changed,
+                                       "outputs": outputs, "limited": limited,
+                                       "sent": [pack(envelope) for _, envelope, _ in deliveries],
+                                       "routes": [route for _, _, route in deliveries]})
+            state.delivered = True
+            self._limited.update(dict.fromkeys(limited))
+            for name, index, body in outputs:
+                self._result.outputs[name][index] = unpack_body(body)
+            for feed, envelope, route in deliveries:
+                self._apply_correction(feed, envelope, route)
+            self._wake()
+        if changed and self._observe is not None:
+            self._tell("corrected", node=node.id, round=round, port=port, message=token, payload=payload)
+        return token
+
+    def _correction_route(self, feed: Feed, envelope: str) -> str:
+        assert self._durable is not None
+        rework = self._durable.rework
+        reader = rework.readers.get(envelope)
+        if reader is None:
+            return "unread" if envelope in self._durable.data["mail"] else "ignore"
+        node, round = reader
+        policy = feed.port.state.node.on_correction
+        if policy == "ignore":
+            return "ignore"
+        if policy == "rerun" and rework.readings[node][round]["replayable"]:
+            return "rerun"
+        return "tell"                      # a saved continuation or graph edit cannot be repeated
+
+    def _apply_correction(self, feed: Feed, envelope: Envelope, route: str) -> None:
+        if route == "unread":
+            at = next(i for i, waiting in enumerate(feed.box) if waiting.id == envelope.replaces)
+            feed.box[at] = envelope
+        elif route == "rerun":
+            receiver = feed.port.state
+            receiver.rework = True
+            self._sched.consider(receiver)
+        else:
+            self._sched.place(feed, envelope)
 
     @staticmethod
     def _reread(receiver: State, feed: Feed, old: str, envelope: Envelope, value: Any) -> None:
@@ -1988,6 +2136,9 @@ class Engine:
                 if act is None or described is None or any(
                         op[0] not in ("add", "connect", "ports", "output", "manage") for op in described):
                     raise GraphError("durable graph edits must add nodes, edges, ports, outputs or management")
+                self._check_current(state)
+                if self._is_rework(state):
+                    raise GraphError("a rework activation cannot edit the graph")
                 operation = {"kind": "topology", "operations": described}
                 if self._replayed(state, operation) is not None:
                     return

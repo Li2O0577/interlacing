@@ -66,6 +66,8 @@ def _provenance(history: list[dict]) -> dict:
         delivery_messages: dict[str, list[dict]] = defaultdict(list)
         for ordinal, (token, _, envelopes, slots) in enumerate(event.get("emits", ()), 1):
             message = {"token": token, "ordinal": ordinal}
+            if "message_version" in event:
+                message["version"] = event["message_version"]
             for _, delivery in envelopes:
                 delivery_messages[delivery].append(message)
             for name, index in slots:
@@ -76,7 +78,7 @@ def _provenance(history: list[dict]) -> dict:
                                                 "message": messages[0] if len(messages) == 1 else None})
         if event["kind"] == "act":
             activations.append({"event_seq": seq, "node": event["node"], "round": event["round"],
-                                "reads": event["reads"]})
+                                "reads": event["reads"], **({"stale": True} if event.get("stale") else {})})
         written = []
         indices = event.get("output_indices")
         for position, name in enumerate(event.get("outputs", ())):
@@ -132,7 +134,7 @@ def explain_records(graph: dict, records: Iterable[dict], status: str, questions
             history.append(history_record(record, seq))
             event = {"seq": seq, "schema_version": history[-1]["schema_version"]}
             event.update({key: record[key] for key in ("kind", "node", "round", "open", "elapsed_seconds", "amounts",
-                                                       "action", "nodes", "by", "edge", "answer", "reason", "problems")
+                                                       "action", "nodes", "by", "edge", "answer", "reason", "problems", "stale")
                           if key in record})
             if kind in ("challenged", "verdict"):
                 event["id"] = record["id"]
@@ -141,6 +143,11 @@ def explain_records(graph: dict, records: Iterable[dict], status: str, questions
                                             for name, index, _ in record["fixed_out"]]
             if kind == "bind":
                 event["took"] = record["took"]
+                if "redo" in record:
+                    event["reworks_round"] = int(record["redo"])
+            if kind == "correct":
+                event.update(token=record["token"], version=record["version"], noop=record["noop"])
+                event["revised_outputs"] = [{"output": name, "index": index} for name, index, _ in record["outputs"]]
             if kind == "fork":
                 event["origin"] = record["origin"]
                 event["inputs"] = [item[0].removeprefix(INPUT) for item in record["sent"]]
@@ -155,7 +162,7 @@ def explain_records(graph: dict, records: Iterable[dict], status: str, questions
                 break
             _apply(ops, descriptions, edges, inputs_map, outputs, sent, activated, managers)
             changed = True
-        if kind in ("run", "fork", "act", "deliver"):
+        if kind in ("run", "fork", "act", "deliver", "correct"):
             sent.update(envelope[0] for envelope in record.get("sent", ()))
         if kind == "act":
             activated.add(record["node"])
