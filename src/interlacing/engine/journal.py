@@ -197,6 +197,13 @@ def history_record(record: dict, seq: int) -> dict:
             [f"{item[0]}#{item[1]}", item[5] if len(item) > 5 else None]
             for item in record.get("sent", ())
         ]
+    if kind in ("challenge", "review_reply"):
+        for name in ("node", "round", "id", "sender", "edge", "envelope", "message", "version", "answer"):
+            if name in record:
+                event[name] = record[name]
+    if kind == "correct" and record.get("answers"):
+        event["replies"] = [{k: reply[k] for k in ("id", "answer", "delivery") if k in reply}
+                            for reply in record["answers"]]
     if kind == "act":
         event.update(node=record["node"], round=record.get("round"), reads=record.get("took"),
                      emits=record.get("emits", []), outputs=[name for name, _ in record.get("out", ())],

@@ -31,16 +31,32 @@ class Rework:
         return self.readings[node][pending.get("redo", str(pending["round"]))]
 
     def current(self, node: str, pending: dict) -> bool:
-        return self.reading(node, pending)["took"] == pending["took"] or pending["resumed"]
+        return self.reading(node, pending)["took"] == pending.get("effective", pending["took"]) or pending["resumed"]
 
-    def emit(self, record: dict, pending: dict) -> None:
+    def emit(self, record: dict, pending: dict, position: int) -> None:
         node, token, port = record["node"], record["token"], record["port"]
         self.messages.setdefault(node, {})[token] = {
-            "port": port, "key": record["key"], "version": 1,
+            "position": position, "round": record["round"], "port": port, "key": record["key"], "version": 1,
             "envelopes": {item[0]: f"{item[0]}#{item[1]}" for item in record["sent"]},
             "outputs": [[name, index] for name, index, _ in record["outputs"]],
         }
         self.reading(node, pending)["emits"].setdefault(port, []).append(token)
+
+    def origin(self, node, edge, delivery, limit):
+        messages = self.messages.get(node, {})
+        for token, item in reversed(messages.items()):
+            if item["envelopes"].get(edge) == delivery:
+                reading = self.readings[node].get(str(item.get("round")), {})
+                version = item.get("edge_versions", {}).get(edge, 1)
+                if version != item["version"]:
+                    return None
+                others = [name for names in reading.get("emits", {}).values() for name in names if name != token]
+                others.sort(key=lambda name: messages[name].get("position", 0))
+                siblings: dict[str, list] = {}
+                for name in others[-limit:]:
+                    siblings.setdefault(messages[name]["port"], []).append(name)
+                return token, version, siblings
+        return None
 
     def revise(self, record: dict) -> None:
         message = self.messages[record["node"]][record["token"]]
@@ -49,12 +65,14 @@ class Rework:
             old = packed[5]
             new = self.store(packed)
             message["envelopes"][packed[0]] = new
-            if route == "rerun":
+            message.setdefault("edge_versions", {})[packed[0]] = record["version"]
+            if route in ("rerun", "answer"):
                 node, round = self.readers.pop(old)
                 self.readers[new] = [node, round]
                 reading = self.readings[node][round]
                 reading["took"] = [new if id == old else id for id in reading["took"]]
-                self.waiting.setdefault(node, {})[round] = None
+                if route == "rerun":
+                    self.waiting.setdefault(node, {})[round] = None
 
     def settle(self, record: dict, pending: dict) -> None:
         node = record["node"]

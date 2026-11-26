@@ -138,7 +138,7 @@ class Scheduler:
             state.resuming, state.resumed = False, True
             state.opening = []
             return inputs, (), ()
-        if state.reviews.pending:                 # it answers a rejection of what it sent (Node.challenged)
+        if bound is None and state.reviews.pending:   # it answers a rejection of what it sent (Node.challenged)
             state.reviews.answering = state.reviews.pending.popleft()
             state.opening = []
             return inputs, (), ()

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from ..base import NodeError, canonical
 from .journal import CheckpointJournal, pack_body, unpack_body
 from .recorder import _envelope
+from .reviews import DurableReviews
 from .rework import Rework
 
 if TYPE_CHECKING:
@@ -37,6 +38,9 @@ class DurableState:
         self.rework = Rework(self.data.setdefault("rework", {
             "messages": {}, "deliveries": {}, "readings": {}, "readers": {}, "waiting": {},
         }))
+
+        self.reviews = DurableReviews(self.data.setdefault("reviews", {}), self.data.setdefault("review_counts", {}),
+                                     self.rework.deliveries)
 
     @classmethod
     def load(cls, journal: CheckpointJournal, *, at: int | None = None) -> tuple[int | None, DurableState]:
@@ -75,14 +79,27 @@ class DurableState:
             node = record["node"]
             data["rounds"][node] = record["round"]
             self.pending[node] = {"round": record["round"], "took": record["took"], "ops": [], "resumed": False}
+            if "answering" in record:
+                self.pending[node]["answering"] = record["answering"]
             self.rework.bind(record)
             if "redo" in record:
                 self.pending[node].update(redo=record["redo"], redo_outputs=record["redo_outputs"])
+        elif kind == "challenge":
+            if "id" in record:
+                self.reviews.opened(record, self.seq)
+            keys = ("kind", "id", "envelope", "reason", "refused", "exhausted")
+            self.pending[record["node"]]["ops"].append({k: record[k] for k in keys if k in record})
+        elif kind in ("review_take", "review_check"):
+            self.pending[record["node"]]["ops"].append(record)
+        elif kind == "review_reply":
+            self.reviews.settled(record)
+            if record.get("explicit"):
+                self.pending[record["node"]]["ops"].append(record)
         elif kind == "deliver":
             pending = self.pending[record["node"]]
             pending["ops"].append({key: record[key] for key in ("kind", "port", "key", "token")})
             self._deliver(record["sent"])
-            self.rework.emit(record, pending)
+            self.rework.emit(record, pending, self.seq)
             counters = data["emitted"].setdefault(record["node"], {})
             counters[record["port"]] = int(record["token"].rsplit("#", 1)[1])
             for name, _, body in record["outputs"]:
@@ -91,6 +108,13 @@ class DurableState:
         elif kind == "correct":
             self.pending[record["node"]]["ops"].append({key: record[key] for key in ("kind", "key", "token")})
             self.rework.revise(record)
+            for reply in record.get("answers", []):
+                self.reviews.settled(reply)
+                if "delivery" in reply:
+                    question = self.reviews.records[reply["id"]]
+                    pending = self.pending[question["node"]]
+                    took = pending.get("effective", pending["took"])
+                    pending["effective"] = [reply["delivery"] if v == question["envelope"] else v for v in took]
             for name, index, body in record["outputs"]:
                 data["outputs"][name][index] = body
             for packed, route in zip(record["sent"], record["routes"]):
@@ -122,10 +146,20 @@ class DurableState:
                     data["snaps"].pop(node, None)
             data["problems"].extend(record.get("problems", ()))
             self.rework.settle(record, pending)
+            releases = self.reviews.references(pending) if self.reviews.records else set()
             if record.get("open"):
+                held = set(pending.get("review_open", ()))
+                for op in pending["ops"]:
+                    if op["kind"] == "review_take":
+                        held.update(op["ids"])
+                if held:
+                    pending["review_open"] = [id for id in held if id in self.reviews.records
+                                              and "result" not in self.reviews.records[id]]
+                pending.pop("effective", None)
                 pending.update(took=[], ops=[], resumed=True)
             else:
                 del self.pending[node]
+            self.reviews.release(releases, self.pending)
         elif kind == "control":
             data["switches"].update(dict.fromkeys(record["nodes"], record["action"]))
         elif kind == "use":
@@ -156,6 +190,7 @@ class DurableState:
                 state.node.restore(data["snaps"][id])
             state.bound = id in self.pending
             state.rework = id in self.rework.waiting
+        self.reviews.rebuild(engine, self.pending)
         for packed in data["mail"].values():
             feed = engine._feeds[packed[0]]
             engine._sched.place(feed, _envelope(feed, packed))

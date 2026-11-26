@@ -136,6 +136,9 @@ def explain_records(graph: dict, records: Iterable[dict], status: str, questions
             event.update({key: record[key] for key in ("kind", "node", "round", "open", "elapsed_seconds", "amounts",
                                                        "action", "nodes", "by", "edge", "answer", "reason", "problems", "stale")
                           if key in record})
+            if kind in ("challenge", "review_reply", "correct"):
+                event.update({k: history[-1][k] for k in ("id", "envelope", "message", "version", "replies")
+                              if k in history[-1]})
             if kind in ("challenged", "verdict"):
                 event["id"] = record["id"]
             if record.get("fixed_out"):

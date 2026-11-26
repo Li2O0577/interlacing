@@ -547,3 +547,174 @@ def test_schema_upgrade_preserves_previous_run_configuration(service):
     finally:
         with db.connect() as conn:
             conn.execute(f'DROP SCHEMA {schema} CASCADE')
+
+
+def disputed_price(ctx, price):
+    """Keep the sender active until both named readers have queried this exact output."""
+    import time
+    token = ctx.emit('out', price)
+    received = {}
+    deadline = time.monotonic() + 8
+    while len(received) < 2:
+        for question in ctx.rejections():
+            assert question['message'] == token
+            received[question['by']] = question
+        if len(received) < 2:
+            assert time.monotonic() < deadline
+            time.sleep(.03)
+    ctx.explain(received['terms']['id'], 'tax included')
+    ctx.correct(token, price + 13)
+
+
+def ask_for_price(ctx, x):
+    reply = ctx.reject('x', 'confirm the price')
+    return reply
+
+
+def subtotal(x):
+    return 2*x
+
+
+def verify_terms(ctx, x, subtotal):
+    assert subtotal == 2*x
+    return ctx.reject('x', 'confirm the price')
+
+
+@pytest.mark.parametrize('cut', ['challenge', 'correct'])
+def test_challenge_worker_takeover_and_private_review(service, cut):
+    db, lead, alice, bob = service
+    def fn(id, name, **options):
+        return {'kind': 'function', 'id': id, 'function': __name__ + '.' + name, **options}
+    graph = {'nodes': [fn('quote', 'disputed_price'), fn('terms', 'verify_terms', on_correction='ignore'),
+                       fn('invoice', 'subtotal'),
+                       fn('total', 'ask_for_price'), {'id': 'audit', 'kind': 'human'},
+                       {'id': 'independent', 'kind': 'human'}],
+             'edges': [{'from': 'quote.out', 'to': n + '.x', 'challenges': 1} for n in ('terms', 'total')] +
+                      [{'from': 'quote.out', 'to': 'invoice.x'}, {'from': 'invoice.out', 'to': 'terms.subtotal'},
+                       {'from': 'total.out', 'to': 'audit.request'}],
+             'inputs': {'seed': 'quote.price', 'separate': 'independent.request'},
+             'outputs': {'terms': 'terms.out', 'total': 'total.out', 'invoice': 'invoice.out',
+                         'approved': 'audit.answer', 'independent': 'independent.answer'}}
+    from interlacing import Catalog, Engine, load
+    inputs = {'seed': 100, 'separate': 'separate review'}
+    catalog = Catalog(allow=[__name__], ask=lambda node, turn, request: {'audit': 'approved', 'independent': 'filed'}[node])
+    standard = Engine(load(graph, catalog), workers=5).run(inputs)
+    run = lead('start', graph=graph, inputs=inputs,
+               assignments={'audit': 'Alice', 'independent': 'Bob'}, workers=5)
+    code = """
+import os,sys
+from interlacing.collab.database import Database, PostgresJournal
+from interlacing.collab.worker import work_one
+db = Database(os.environ['INTERLACING_TEST_POSTGRES'])
+write = PostgresJournal.write
+def die(self, event):
+    write(self, event)
+    if event['kind'] == sys.argv[1]:
+        os._exit(48)
+PostgresJournal.write = die
+work_one(db, 'interrupted', allow=[sys.argv[2]])
+"""
+    env = {**os.environ, 'PYTHONPATH': os.path.dirname(__file__)}
+    assert subprocess.run([sys.executable, '-c', code, cut, __name__], env=env, timeout=20).returncode == 48
+    from interlacing.collab.database import Lease
+    with db.connect() as conn:
+        old = conn.execute("SELECT c.id,r.generation FROM il_commands c JOIN il_runs r ON r.id=c.run "
+                           "WHERE c.run=%s AND NOT c.done ORDER BY c.id LIMIT 1", (run['run'],)).fetchone()
+        conn.execute("UPDATE il_runs SET expires=clock_timestamp()-interval '1 second' WHERE id=%s", (run['run'],))
+    with pytest.raises(LostLease):
+        PostgresJournal(db, Lease(run['run'], old['id'], old['generation'], 'interrupted')).write(
+            {'kind': 'review_reply', 'id': 'late reply from expired worker'})
+    assert work_one(db, 'replacement', allow=[__name__])['state'] == 'waiting', lead('status', **run)
+    task, = alice('tasks')
+    assert task['request'] == {'answer': 'corrected', 'value': 113}
+    separate, = bob('tasks')
+    assert separate['request'] == 'separate review'
+    alice('submit', task=task['id'], version=task['version'], answer='approved')
+    bob('submit', task=separate['id'], version=separate['version'], answer='filed')
+    assert work_one(db, 'finish', allow=[__name__])['state'] == 'done'
+    outputs = lead('status', **run)['result']['outputs']
+    assert outputs == standard.outputs
+    assert outputs == {'terms': [{'answer': 'explained', 'text': 'tax included'}], 'invoice': [226],
+                       'total': [{'answer': 'corrected', 'value': 113}],
+                       'approved': ['approved'], 'independent': ['filed']}
+    records = [row['record'] for row in lead('history', **run, limit=500)]
+    questions = [e for e in records if e['kind'] == 'challenge']
+    assert len(questions) == 2 and {e['node'] for e in questions} == {'terms', 'total'}
+    assert all(e['number'] == 1 and e['message'] == 'out#1' for e in questions)
+    assert sum(e['kind'] == 'correct' and e['node'] == 'quote' for e in records) == 1
+    rounds = lead('status', **run)['result']['rounds']
+    assert rounds == standard.rounds
+    assert rounds['invoice'] == 2 and rounds['total'] == rounds['independent'] == 1
+
+
+def release_after_independent_review(path):
+    from pathlib import Path
+    Path(path).touch()
+    return 'released'
+
+
+def quote_until_release(ctx, path):
+    from pathlib import Path
+    import time
+    ctx.emit('out', 100)
+    deadline = time.monotonic() + 15
+    while not Path(path).exists():
+        assert time.monotonic() < deadline
+        time.sleep(.025)
+
+
+def test_independent_person_can_finish_while_price_is_disputed(service, tmp_path):
+    import time
+    db, lead, _, bob = service
+    gate = tmp_path / 'reviewed'
+    nodes = [{'kind': 'function', 'id': name, 'function': f'{__name__}.{fn}'} for name, fn in (
+        ('quote', 'quote_until_release'), ('verify', 'ask_for_price'), ('release', 'release_after_independent_review'))]
+    graph = {'nodes': [*nodes, {'kind': 'human', 'id': 'independent'}],
+             'inputs': {'gate': 'quote.path', 'separate': 'independent.request'},
+             'outputs': {'decision': 'verify.out', 'other': 'release.out'},
+             'edges': [{'from': 'quote.out', 'to': 'verify.x', 'challenges': 1},
+                       {'from': 'independent.answer', 'to': 'release.path'}]}
+    run = lead('start', graph=graph, inputs={'gate': str(gate), 'separate': 'check the file'},
+               assignments={'independent': 'Bob'})
+    with ThreadPoolExecutor(1) as pool:
+        future = pool.submit(work_one, db, 'both-branches', allow=[__name__])
+        try:
+            deadline = time.monotonic() + 10
+            while True:
+                history = lead('history', **run)
+                tasks = bob('tasks')
+                if any(row['record']['kind'] == 'challenge' for row in history) and tasks:
+                    break
+                assert time.monotonic() < deadline and not future.done()
+                time.sleep(.025)
+            assert not any(row['record']['kind'] == 'review_reply' for row in history)
+            task, = tasks
+            bob('submit', task=task['id'], version=task['version'], answer=str(gate))
+            assert future.result(timeout=8)['state'] == 'done'
+        finally:
+            gate.touch()
+    assert lead('status', **run)['result']['outputs']['decision'][0]['answer'] == 'explained'
+    records = [item['record'] for item in lead('history', **run)]
+    assert next(i for i, r in enumerate(records) if r['kind'] == 'act' and r['node'] == 'independent') < next(
+        i for i, r in enumerate(records) if r['kind'] == 'review_reply')
+
+
+def test_nested_challenges_have_independent_budgets_and_archived_replies(service):
+    db, lead, _, _ = service
+    inner = {'nodes': [{'id': 'quote', 'kind': 'pass'}, {'id': 'verify', 'kind': 'function',
+                       'function': __name__ + '.ask_for_price'}],
+             'inputs': {'in': 'quote.x'}, 'outputs': {'out': 'verify.out'},
+             'edges': [{'from': 'quote.y', 'to': 'verify.x', 'challenges': 1}]}
+    graph = {'method': 'fan', 'nodes': [{'id': n, 'kind': 'block', 'graph': inner} for n in ('a', 'b')]}
+    for bad in (False, -1, '2'):
+        inner['edges'][0]['challenges'] = bad
+        with pytest.raises(ValueError, match=r'edges\[0\].challenges'):
+            lead('start', graph=graph)
+    inner['edges'][0]['challenges'] = 1
+    run = lead('start', graph=graph, inputs={'in': 9})
+    assert work_one(db, 'groups', allow=[__name__])['state'] == 'done', lead('status', **run)
+    for name in ('a', 'b'):
+        history = lead('history', **run, scope=[[name, 1]])
+        assert all(row['archived'] for row in history)
+        q, reply = [row['record'] for row in history if row['record']['kind'] in ('challenge', 'review_reply')]
+        assert q['version'] == 1 and q['id'] == reply['id'] and reply['answer'] == 'explained'

@@ -314,9 +314,9 @@ class Engine:
 
     @staticmethod
     def _check_durable_graph(graph: Graph) -> None:
-        unsupported = [edge.id for edge in graph.edges if edge.protocol not in ("value", "artifact") or edge.challenges]
+        unsupported = [edge.id for edge in graph.edges if edge.protocol not in ("value", "artifact")]
         if unsupported:
-            raise GraphError(f"durable journals require value or artifact edges without challenges: {', '.join(unsupported)}")
+            raise GraphError(f"durable journals require value or artifact edges: {', '.join(unsupported)}")
 
     def _restore_durable(self, recorder: Recorder, change: bool) -> bool:
         if change:
@@ -753,7 +753,16 @@ class Engine:
             if got is None:
                 return False
             feed = got[0]
-            return feed.challenges is not None and feed.rejected < feed.challenges and not feed.gone
+            if feed.challenges is None:
+                return False
+            allowed = feed.rejected < feed.challenges and not feed.gone
+            if self._durable is not None:
+                op = {"kind": "review_check", "envelope": got[1].id}
+                saved = self._replayed(state, op)
+                if saved is not None:
+                    return bool(saved["allowed"])
+                self._write_durable(state, {**op, "node": state.node.id, "allowed": allowed})
+            return allowed
 
     def _taken_on(self, state: State, port: str) -> list:
         """``ctx.taken``: what this activation took on ``port``, in order: its id and who sent it."""
@@ -777,29 +786,59 @@ class Engine:
         if feed.challenges is None:
             raise NodeError(f"{state.node.id}.{port}: the edge {feed.id} takes no rejections (give it challenges)")
         sender = feed.source
-        if feed.rejected >= feed.challenges:
+        durable = self._durable
+        operation = {"kind": "challenge", "envelope": envelope.id, "reason": str(reason)}
+        if durable is not None:
+            self._check_current(state)
+            saved = self._replayed(state, operation)
+            if saved is not None:
+                if "refused" in saved:
+                    if saved.get("exhausted"):
+                        self._checks.record(state, port, f"rejected: {reason}; {saved['refused']}", "unanswered",
+                                            ctx._act, state.round)
+                    return {"answer": "refused", "why": saved["refused"]}
+                question = durable.reviews.live[saved["id"]]
+                state.reviews.awaiting = question
+                return question
+        why = ""
+        exhausted = feed.rejected >= feed.challenges
+        if exhausted:
             why = f"the edge {feed.id} has taken all the rejections it may ({feed.challenges})"
             self._checks.record(state, port, f"rejected: {reason}; {why}", "unanswered", ctx._act, state.round)
+        elif feed.gone or sender is None or sender.status == STOPPED or self._states.get(sender.node.id) is not sender:
+            why = "the sender is stopped or gone, and cannot answer"
+        if why:
+            if durable is not None:
+                self._write_durable(state, {**operation, "node": state.node.id, "refused": why, "exhausted": exhausted})
             return {"answer": "refused", "why": why}
-        if feed.gone or sender is None or sender.status == STOPPED or self._states.get(sender.node.id) is not sender:
-            return {"answer": "refused", "why": "the sender is stopped or gone, and cannot answer"}
         assert sender is not None
+        if durable is not None:
+            source = durable.rework.origin(sender.node.id, feed.id, envelope.id, SIBLINGS)
+            if source is None:
+                why = "this delivery has already been replaced"
+                self._write_durable(state, {**operation, "node": state.node.id, "refused": why})
+                return {"answer": "refused", "why": why}
+            message, version, sent = source
+        else:
+            message = next((name for name, sent in reversed(sender.sent_log.items())
+                            if any(id == envelope.id for _, id in sent.envelopes)), None)
+            sent = {}
+            if message is not None:
+                round = sender.sent_log[message].round
+                others = [name for name, other in reversed(sender.sent_log.items())
+                          if other.round == round and name != message][:SIBLINGS]
+                for name in reversed(others):
+                    sent.setdefault(sender.sent_log[name].port, []).append(name)
         feed.rejected += 1
         if ctx._act is not None:
             ctx._act.rejects.append(feed.id)
-        message = next((name for name, sent in reversed(sender.sent_log.items())
-                        if any(id == envelope.id for _, id in sent.envelopes)), None)
         content = self._checks.arrived(state, feed, envelope.body)
-        sent: dict[str, list] = {}
-        if message is not None:                 # what the same activation sent: it may be wrong too
-            round = sender.sent_log[message].round
-            others = [name for name, other in reversed(sender.sent_log.items())
-                      if other.round == round and name != message][:SIBLINGS]
-            for name in reversed(others):
-                sent.setdefault(sender.sent_log[name].port, []).append(name)
         rejection = Rejection(f"{feed.id}!{feed.rejected}", feed, envelope.id, feed.out, message, content, str(reason),
                               state.node.id, sent)
-        if self._recorder is not None:
+        if durable is not None:
+            self._write_durable(state, durable.reviews.describe(rejection, state, str(reason), feed.rejected, version))
+            durable.reviews.live[rejection.id] = rejection
+        elif self._recorder is not None:
             self._recorder.review("challenged", rejection)
         sender.reviews.pending.append(rejection)
         state.reviews.awaiting = rejection
@@ -810,6 +849,15 @@ class Engine:
     def _settled(self, state: State, ctx: RunContext, rejection: Rejection) -> dict | None:
         """The answer to the rejection this activation waits on, once there is one. Under the lock."""
         if rejection.answer is None:
+            if self._durable is not None:
+                self._check_current(state)
+                if self._error or self._over or self._stopping():
+                    ctx._cut = True
+                    return {"answer": "refused", "why": "the drive stopped"}
+                if rejection.feed.source is not None and rejection.feed.source.status == STOPPED:
+                    self._withdraw(rejection, "the sender was stopped, and cannot answer")
+                if rejection.answer is None and self._waiting_tasks and self._idle():
+                    raise WaitingForTasks(self.waiting_tasks())
             if state.halt or self._stopping() or self._over:
                 ctx._cut = ctx._cut or bool(state.halt) or self._stopping()
                 self._withdraw(rejection, "the run is ending, or this node is to end")
@@ -821,13 +869,27 @@ class Engine:
             else:
                 return None
         state.reviews.awaiting = None
-        if self._recorder is not None:
+        if self._durable is not None:
+            reply = self._durable.reviews.records[rejection.id]["result"]
+            if "delivery" in reply:
+                packed = self._durable.rework.deliveries[reply["delivery"]]
+                self._retook(state.took_on.get(rejection.feed.port.port.name), rejection.feed,
+                             rejection.envelope, _envelope(rejection.feed, packed))
+        elif self._recorder is not None:
             self._recorder.review("verdict", rejection)
         return rejection.verdict()
 
-    @staticmethod
-    def _withdraw(rejection: Rejection, why: str) -> None:
-        rejection.settle("refused", why)
+    def _settle_review(self, state, rejection, answer, text, *, explicit=False):
+        if rejection.answer is not None:
+            return False
+        if self._durable is None:
+            return rejection.settle(answer, text)
+        self._write_durable(state, {"kind": "review_reply", "id": rejection.id, "node": state.node.id,
+                                   "answer": answer, "text": text, "explicit": explicit})
+        return True
+
+    def _withdraw(self, rejection: Rejection, why: str) -> None:
+        self._settle_review(self._states[rejection.by], rejection, "refused", why)
         sender = rejection.feed.source
         if sender is not None:
             try:
@@ -842,7 +904,7 @@ class Engine:
             return
         for rejection in waiting:
             if rejection.answer is None:
-                rejection.settle("refused", why)
+                self._settle_review(state, rejection, "refused", why)
         state.reviews.pending.clear()
         state.reviews.open.clear()
         self._lock.notify_all()
@@ -936,15 +998,32 @@ class Engine:
         with self._lock:
             if not state.running or ctx._state is not state:
                 raise NodeError(f"{state.node.id} can take up rejections only in an activation of its own")
-            return state.reviews.take()
+            if self._durable is None or not any(feed.challenges is not None for feeds, _ in state.outs.values()
+                                                for feed, _ in feeds):
+                return state.reviews.take()
+            replayed = self._replayed(state, {"kind": "review_take"})
+            if replayed is not None:
+                taken = [self._durable.reviews.live[id] for id in replayed["ids"]]
+                for r in taken:
+                    if r in state.reviews.pending:
+                        state.reviews.pending.remove(r)
+                    if r.answer is None:
+                        state.reviews.open[r.id] = r
+                return [r.shown() for r in taken]
+            shown = state.reviews.take()
+            self._write_durable(state, {"kind": "review_take", "node": state.node.id, "ids": [r["id"] for r in shown]})
+            return shown
 
     def _explain(self, state: State, id: str, text: str) -> None:
         """``ctx.explain``: what was rejected stands, for this reason."""
         with self._lock:
+            if self._durable is not None and self._replayed(state, {"kind": "review_reply", "id": str(id),
+                                                                   "text": str(text)}) is not None:
+                return
             rejection = state.reviews.open.pop(str(id), None)
             if rejection is None:
                 raise NodeError(f"{state.node.id} has no rejection {id!r} to answer")
-            rejection.settle("explained", str(text))
+            self._settle_review(state, rejection, "explained", str(text), explicit=True)
             self._lock.notify_all()
 
     def _answer(self, state: State, ctx: RunContext) -> None:
@@ -952,7 +1031,7 @@ class Engine:
         rejection = state.reviews.answering
         assert rejection is not None
         with self._lock:
-            if rejection.answer is not None:
+            if rejection.answer is not None and not state.replay:
                 return
             state.reviews.open[rejection.id] = rejection
         answer = waited(state.node.challenged(ctx, rejection.shown()))
@@ -962,7 +1041,7 @@ class Engine:
         rejection = state.reviews.answering
         assert rejection is not None
         with self._lock:
-            if rejection.answer is not None:
+            if rejection.answer is not None and not state.replay:
                 return
             state.reviews.open[rejection.id] = rejection
         answer = state.node.challenged(ctx, rejection.shown())
@@ -973,10 +1052,14 @@ class Engine:
     def _unanswered(self, state: State, rejection: Rejection, answer: Any) -> None:
         with self._lock:
             state.reviews.open.pop(rejection.id, None)
-            if state.status == STOPPED:         # stopped while it answered: what it returns is not its answer
-                settled = rejection.settle("refused", "the sender was stopped, and cannot answer")
-            else:
-                settled = rejection.settle("explained", str(answer) if answer is not None else "no reason was given")
+            outcome = "explained"
+            text = str(answer) if answer is not None else "no reason was given"
+            if state.status == STOPPED:
+                outcome, text = "refused", "the sender was stopped, and cannot answer"
+            if self._durable is not None and self._replayed(state, {"kind": "review_reply", "id": rejection.id,
+                                                                   "answer": outcome, "text": text}) is not None:
+                return
+            settled = self._settle_review(state, rejection, outcome, text, explicit=True)
             if settled:
                 self._lock.notify_all()
 
@@ -1303,7 +1386,7 @@ class Engine:
             if pending is not None:
                 state.resuming, state.resumed = False, pending["resumed"]
                 state.replay = deque(pending["ops"])
-            if pending is None and durable is not None and state.rework:
+            if pending is None and durable is not None and state.rework and not state.reviews.pending:
                 redo = next(iter(durable.rework.waiting[node]))
                 reading = durable.rework.readings[node][redo]
                 binding = {"redo": redo, "took": reading["took"], "redo_outputs": reading["emits"]}
@@ -1316,6 +1399,13 @@ class Engine:
                     envelopes.append((feed, _envelope(feed, packed)))
                 taken = sched.retake(state, envelopes, read)
                 state.redoing = {port: deque(tokens) for port, tokens in binding["redo_outputs"].items()}
+            elif pending is not None and "answering" in pending:
+                assert durable is not None
+                question = durable.reviews.live[pending["answering"]]
+                if question in state.reviews.pending:
+                    state.reviews.pending.remove(question)
+                state.reviews.answering = question
+                taken, cause, took = {}, (), ()
             else:
                 bound: list[Feed] | None = None
                 if pending is not None:
@@ -1329,6 +1419,7 @@ class Engine:
             if durable is not None and pending is None:
                 assert self._recorder is not None
                 self._recorder.write({"kind": "bind", "node": node, "round": state.round, "took": list(took),
+                                      **({"answering": state.reviews.answering.id} if state.reviews.answering else {}),
                                       **(binding or {})})
                 state.bound = True
         except Exception as exc:   # noqa: BLE001 - a protocol's decode failed
@@ -1535,6 +1626,11 @@ class Engine:
         """End a superseded physical activation while leaving its logical reading ready for rework."""
         assert self._durable is not None and self._recorder is not None and act is not None
         try:
+            for op in self._durable.pending[state.node.id]["ops"]:
+                if op["kind"] == "challenge" and "id" in op:
+                    question = self._durable.reviews.live[op["id"]]
+                    if question.answer is None:
+                        self._withdraw(question, "the inputs of the questioning activation were superseded")
             snapshot = self._durable.data["snaps"].get(state.node.id)
             if snapshot is not None:
                 state.node.restore(snapshot)
@@ -1883,7 +1979,24 @@ class Engine:
                     continue
                 envelope = self._sched.envelope(feed, copy_body(body), round, cause, old)
                 deliveries.append((feed, envelope, route))
+            answers: list[dict] = []
+            if not changed:
+                for delivery in message["envelopes"].values():
+                    awaiting = durable.reviews.unanswered.get(delivery)
+                    if awaiting is not None:
+                        answers.append({"id": awaiting, "answer": "corrected", "delivery": delivery})
+            for i, (feed, envelope, route) in enumerate(deliveries):
+                if route == "answer":
+                    id = durable.reviews.unanswered[envelope.replaces]
+                    try:
+                        self._checks.arrived(feed.port.state, feed, envelope.body)
+                    except (ValueError, TypeError) as exc:
+                        deliveries[i] = (feed, envelope, "refused")
+                        answers.append({"id": id, "answer": "refused", "text": f"the correction could not be read: {exc}"})
+                    else:
+                        answers.append({"id": id, "answer": "corrected", "delivery": envelope.id})
             self._write_durable(state, {**operation, "node": node.id, "round": round, "port": port,
+                                       **({"answers": answers} if answers else {}),
                                        "version": message["version"] + int(changed), "noop": not changed,
                                        "outputs": outputs, "limited": limited,
                                        "sent": [pack(envelope) for _, envelope, _ in deliveries],
@@ -1902,6 +2015,8 @@ class Engine:
     def _correction_route(self, feed: Feed, envelope: str) -> str:
         assert self._durable is not None
         rework = self._durable.rework
+        if envelope in self._durable.reviews.unanswered:
+            return "answer"
         reader = rework.readers.get(envelope)
         if reader is None:
             return "unread" if envelope in self._durable.data["mail"] else "ignore"
@@ -1914,6 +2029,8 @@ class Engine:
         return "tell"                      # a saved continuation or graph edit cannot be repeated
 
     def _apply_correction(self, feed: Feed, envelope: Envelope, route: str) -> None:
+        if route in ("answer", "refused"):
+            return  # consumed as the challenge result
         if route == "unread":
             at = next(i for i, waiting in enumerate(feed.box) if waiting.id == envelope.replaces)
             feed.box[at] = envelope

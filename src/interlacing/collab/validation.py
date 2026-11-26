@@ -95,9 +95,12 @@ def validate_submission(graph, workers, assignments=None):
             where = f"{path}.edges[{index}]"
             if not isinstance(edge, dict) or not all(isinstance(edge.get(k), str) for k in ("from", "to")):
                 raise SpecError(f"{where}: expected from and to endpoints")
-            if edge.get("protocol", "value") not in ("value", "artifact") or edge.get("challenges"):
+            budget = edge.get("challenges")
+            if budget is not None and (type(budget) is not int or budget < 1):
+                raise SpecError(f"{where}.challenges: expected a positive integer")
+            if edge.get("protocol", "value") not in ("value", "artifact"):
                 raise SpecError(f"{where} ({edge['from']} -> {edge['to']}): durable delivery requires "
-                                "value or artifact without challenges")
+                                "value or artifact")
         for field in ("nodes", "children"):
             parts = part.get(field, [])
             if not isinstance(parts, list):

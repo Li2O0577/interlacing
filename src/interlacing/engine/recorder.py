@@ -79,7 +79,7 @@ class Recorder:
         child_history = []
         for child in children:
             events = [history_record(record, seq) for seq, record in enumerate(child.read(), 1)
-                      if record["kind"] in ("run", "act", "deliver", "correct")]
+                      if record["kind"] in ("run", "act", "deliver", "correct", "challenge", "review_reply")]
             if events:
                 child_history.append(events)
         self.write({"kind": "act", "node": act.node, "round": act.round, "took": list(act.took),
