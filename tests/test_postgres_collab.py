@@ -498,6 +498,7 @@ def test_interrupted_retry_respects_attempt_budget(service, tmp_path, monkeypatc
     module = tmp_path / 'business_service.py'
     module.write_text("from pathlib import Path\ndef unavailable(marker):\n"
                       "    with Path(marker).open('a') as f: f.write('attempt\\n')\n"
+                      "    if Path(marker + '.ready').exists(): return 42\n"
                       "    raise ConnectionError('offline')\n")
     monkeypatch.syspath_prepend(str(tmp_path))
     marker = tmp_path / 'attempts'
@@ -523,6 +524,20 @@ work_one(Database(os.environ['INTERLACING_TEST_POSTGRES']), 'first', allow=['bus
     assert work_one(db,'next',allow=['business_service'])['state'] == 'failed'
     assert 'exhausted 2 attempts' in lead('status', **run)['result']['error']
     assert Path(marker).read_text().splitlines() == ['attempt', 'attempt']
+    lead('retry', **run)
+    cut_retry = code.replace("record['kind'] == 'once'", "record.get('name', '').endswith('-attempt-1')")
+    assert subprocess.run([sys.executable, '-c', cut_retry], env=env, timeout=15).returncode == 43
+    with db.connect() as conn:
+        conn.execute("UPDATE il_runs SET expires=clock_timestamp() WHERE id=%s", (run['run'],))
+    assert work_one(db, 'still-offline', allow=['business_service'])['state'] == 'failed'
+    assert len(marker.read_text().splitlines()) == 4
+    Path(str(marker) + '.ready').touch()
+    lead('retry', **run)
+    with pytest.raises(Refused):
+        lead('retry', **run)
+    assert work_one(db, 'recovered', allow=['business_service'])['state'] == 'done'
+    assert lead('status', **run)['result']['outputs'] == {'out': [42]}
+    assert len(marker.read_text().splitlines()) == 5
 
 
 def test_schema_upgrade_preserves_previous_run_configuration(service):
@@ -718,3 +733,87 @@ def test_nested_challenges_have_independent_budgets_and_archived_replies(service
         assert all(row['archived'] for row in history)
         q, reply = [row['record'] for row in history if row['record']['kind'] in ('challenge', 'review_reply')]
         assert q['version'] == 1 and q['id'] == reply['id'] and reply['answer'] == 'explained'
+
+
+def test_fork_output_reopens_only_dependent_human_review(service):
+    db, lead, alice, _ = service
+    graph = {'nodes': [{'id': name, 'kind': 'human', 'outputs': [{'name': 'answer', 'schema': 'int'}]}
+                       for name in ('price', 'review')],
+             'edges': [{'from': 'price.answer', 'to': 'review.request'}],
+             'outputs': {'signed': 'review.answer'}, 'inputs': {'x': 'price.request'}}
+    run = lead('start', graph=graph, inputs={'x': 'quote'}, assignments={'price': 'Alice', 'review': 'Alice'})
+    for answer in (9, 10):
+        assert work_one(db, 'ask')['state'] == 'waiting'
+        task, = [t for t in alice('tasks') if t['state'] == 'claimed']
+        alice('submit', task=task['id'], version=task['version'], answer=answer)
+    assert work_one(db, 'finish')['state'] == 'done'
+    history = lead('history', **run)
+    edit = {'node': 'price', 'token': 'answer#1', 'version': 1, 'value': 12, 'reason': 'revised quote'}
+    branch = lead('fork', **run, at=history[-1]['seq'], output=edit, execute=True)['run']
+    correction = lead('history', run=branch)[-1]['record']
+    assert correction['external'] == {'actor': 'lead', 'reason': 'revised quote', 'previous_version': 1}
+    assert work_one(db, 'ask-again')['state'] == 'waiting'
+    pending, = [t for t in alice('tasks') if t['run'] == branch]
+    assert pending['node'] == 'review' and pending['request'] == 12
+    alice('submit', task=pending['id'], version=pending['version'], answer=13)
+    assert work_one(db, 'finish-again')['state'] == 'done'
+    assert lead('status', run=branch)['result']['outputs']['signed'] == [13]
+    assert lead('history', **run) == history and lead('status', **run)['result']['outputs']['signed'] == [10]
+
+
+def report_then_wait(ctx, gate):
+    import time
+    from pathlib import Path
+    ctx.progress('reviewing evidence')
+    deadline = time.monotonic() + 8
+    while not Path(gate).exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError('test reader did not release the gate')
+        time.sleep(.02)
+    return 'private result'
+
+
+def test_live_progress_before_completion_and_cursor_resume(service, tmp_path, monkeypatch):
+    from interlacing.collab.client import Client, ServiceError
+    db, *_ = service
+    monkeypatch.setenv('no_proxy', '127.0.0.1')
+    service_api = Collaboration(db)
+    token = service_api.bootstrap(str(uuid4()), 'lead')['token']
+    graph = {'method': 'chain', 'nodes': [{'id': 'slow', 'kind': 'function', 'context': True,
+                                           'function': __name__ + '.report_then_wait'}]}
+    gate = tmp_path / 'release'
+    with server(db, 0) as http, ThreadPoolExecutor(2) as pool:
+        serving = pool.submit(http.serve_forever)
+        try:
+            url = 'http://127.0.0.1:' + str(http.server_port)
+            client = Client(url, token)
+            member = Client(url, client.request('member', name='Bob')['token'])
+            run = client.request('start', graph=graph, inputs={'in': str(gate)})
+            with pytest.raises(ServiceError) as err:
+                next(member.stream_progress(**run))
+            assert err.value.status == 403
+            live = client.stream_progress(**run)
+            assert next(live)['state'] == 'queued'
+            worker = pool.submit(work_one, db, 'worker', allow=[__name__])
+            observed = []
+            for frame in live:
+                if frame['type'] == 'event':
+                    observed.append(frame['seq'])
+                if frame.get('message') == 'reviewing evidence':
+                    break
+            assert not worker.done() and frame['node'] == 'slow'
+            second = client.stream_progress(**run, after=observed[-1])
+            assert next(second)['state'] == 'running'
+            live.close()
+            gate.touch()
+            remaining = list(second)
+            assert worker.result()['state'] == 'done' and remaining[-1]['state'] == 'done'
+            assert observed + [f['seq'] for f in remaining if f['type']=='event'] == [
+                e['seq'] for e in client.request('history', **run)]
+            assert 'private result' not in str(remaining)
+            with pytest.raises(ServiceError, match='cursor'):
+                next(client.stream_progress(**run, after=9999))
+        finally:
+            gate.touch()
+            http.shutdown()
+            serving.result()

@@ -63,6 +63,8 @@ class DurableState:
         data = self.data
         kind = record["kind"]
         data["seq"] += 1
+        if kind == "progress":
+            return  # Display messages advance the cursor without reopening a finished run.
         if kind != "fork" or record["sent"]:
             data["ended"] = kind == "end"
         if kind == "run":
@@ -106,7 +108,8 @@ class DurableState:
                 data["outputs"].setdefault(name, []).append(body)
             data["limited"].update(dict.fromkeys(record["limited"]))
         elif kind == "correct":
-            self.pending[record["node"]]["ops"].append({key: record[key] for key in ("kind", "key", "token")})
+            if "external" not in record:
+                self.pending[record["node"]]["ops"].append({key: record[key] for key in ("kind", "key", "token")})
             self.rework.revise(record)
             for reply in record.get("answers", []):
                 self.reviews.settled(reply)
@@ -167,6 +170,20 @@ class DurableState:
                 data["used"][name] = data["used"].get(name, 0) + value
         elif kind == "once":
             data["once"].setdefault(record["node"], {}).setdefault(str(record["round"]), {})[record["name"]] = record["value"]
+
+    def correction_route(self, envelope: str, policy: str) -> str:
+        """Route by the actual consumer and whether its original activation is replayable."""
+        if envelope in self.reviews.unanswered:
+            return "answer"
+        reader = self.rework.readers.get(envelope)
+        if reader is None:
+            return "unread" if envelope in self.data["mail"] else "ignore"
+        if policy == "ignore":
+            return "ignore"
+        node, turn = reader
+        if policy == "rerun" and self.rework.readings[node][turn]["replayable"]:
+            return "rerun"
+        return "tell"
 
     def _deliver(self, envelopes: list) -> None:
         for packed in envelopes:

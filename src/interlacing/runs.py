@@ -43,6 +43,7 @@ from .engine import Engine, Journal, RunError, SQLiteJournal
 from .engine.durable import DurableState
 from .engine.journal import pack_body
 from .engine.wiring import INPUT
+from .forking import output_correction
 from .nodes import Workspace
 from .models import ChatResult, FakeProvider, ProviderError, build
 from .spec import Catalog, SpecError, dump, load, load_node
@@ -550,7 +551,7 @@ class Run:
         return DurableState.load(journal, at=at)
 
     def fork(self, directory, *, at: int, inputs: Mapping[str, Any] | None = None,
-             execute: bool = False) -> Run:
+             execute: bool = False, output: dict | None = None) -> Run:
         """Copy a settled root position into a new run. Only an executable fork may be resumed."""
         journal = self._history_journal()
         _, state = self._history_at(journal, at)
@@ -558,6 +559,7 @@ class Run:
             raise SpecError(f"cannot fork at event {at}: unfinished activations: {', '.join(sorted(state.pending))}")
         graph = _read(self.directory / "graph.json")
         overrides = fork_inputs(graph, state, inputs or {})
+        correction = output_correction(graph, state, output, actor="local")
         target = type(self)(directory, models=self.models, observe=self.observe)
         location = target.directory.resolve()
         options = _read(self.directory / "options.json")
@@ -578,7 +580,7 @@ class Run:
                 saved_inputs = {}
 
                 def prefix():
-                    for record in chain([header], records, [branch]):
+                    for record in chain([header], records, [branch], [correction] if correction else []):
                         if record["kind"] in ("run", "fork"):
                             for edge, _, _, body, *_ in record["sent"]:
                                 saved_inputs[edge.removeprefix(INPUT)] = body[1]
@@ -588,6 +590,8 @@ class Run:
                 target_journal.seed(prefix())
                 state.data["run"]["id"] = header["id"]
                 state.apply(branch)
+                if correction:
+                    state.apply(correction)
                 target_journal.checkpoint(state.data)
                 _write(target.directory / "options.json", options)
                 _write(target.directory / "inputs.json", saved_inputs)

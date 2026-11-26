@@ -160,3 +160,51 @@ def test_v2_checkpoints_are_read_without_migration_then_retained_when_written(tm
     assert journal.recovery(at=5) == ({'seq': 5}, [])
     journal.reset()
     assert journal.positions() == (0, [])
+
+
+def test_edit_committed_output_only_replays_its_consumers(tmp_path):
+    CALLS.clear()
+    nodes = [{'id': name, 'kind': 'function', 'function': __name__ + '.twice',
+              'inputs': [{'name': 'x', 'schema': 'int'}], 'outputs': [{'name': 'y', 'schema': 'int'}]}
+             for name in ('price', 'total', 'independent')]
+    graph = {'nodes': nodes, 'edges': [{'from': 'price.y', 'to': 'total.x'}],
+             'inputs': {'x': 'price.x', 'z': 'independent.x'}, 'outputs': {'total': 'total.y', 'other': 'independent.y'}}
+    parent = Run.create(tmp_path / 'parent', graph, allow=[__name__], journal='sqlite', durable=True)
+    assert parent.start({'x': 2, 'z': 17})['outputs'] == {'total': [8], 'other': [34]}
+    at = parent.checkpoints()['last_event']
+    edit = {'node': 'price', 'token': 'y#1', 'version': 1, 'reason': 'supplier revision', 'value': 7}
+    for invalid in ({'version': 2}, {'reason': ''}, {'value': True}):
+        with pytest.raises(ValueError):
+            parent.fork(tmp_path / 'bad', at=at, output={**edit, **invalid})
+    CALLS.clear()
+    for value in (7, 11):
+        directory = tmp_path / str(value)
+        assert call('fork', '--dir', parent.directory, '--to', directory, '--at', at, '--execute',
+                    '--output', json.dumps({**edit, 'value': value}))[0] == 0
+        with sqlite3.connect(directory / 'journal.sqlite3') as db:
+            db.execute('DELETE FROM checkpoints')
+        assert Run(directory).resume()['outputs'] == {'total': [2 * value], 'other': [34]}
+    assert CALLS == [('twice', 7), ('twice', 11)]
+    assert parent.checkpoints()['last_event'] == at and parent.show(at=at)['values']['total'] == [8]
+
+
+@pytest.mark.parametrize("failure,policy,calls", [
+    (ValueError, ["timeout", "connection"], 1),
+    (TimeoutError, ["connection"], 1),
+    (ConnectionError, ["timeout"], 1),
+    (ConnectionError, ["connection"], 2),
+])
+def test_only_selected_transient_failures_retry(failure, policy, calls):
+    from unittest.mock import Mock
+    ctx = Mock(retry_authorization=0)
+    ctx.once.side_effect = lambda name, action: action()
+    ctx.stopping.return_value = False
+
+    attempts = []
+    def fail():
+        attempts.append(1)
+        raise failure('unavailable')
+    node = FunctionNode('fetch', fail, retry_attempts=2, retry_on=policy)
+    with pytest.raises(failure):
+        node.run(ctx, {})
+    assert len(attempts) == calls

@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from ..base import Ref, canonical
 from ..spec.kinds import schema_of
-from .history import fork_run, inspect_run, positions, read_history
+from .history import fork_run, inspect_run, positions, progress_page, read_history
 from .validation import validate_submission
 from .database import Database, Refused, encoded
 
@@ -53,7 +53,7 @@ class Collaboration:
 
     def request(self, token, action, args):
         with self.database.connect() as db:
-            if action in ("history", "inspect", "checkpoints", "fork"):
+            if action in ("history", "progress", "inspect", "checkpoints", "fork"):
                 db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             actor = db.execute("SELECT project,name,role FROM il_members WHERE secret=%s FOR SHARE",
                                (_secret(token),)).fetchone()
@@ -63,7 +63,7 @@ class Collaboration:
                           "put": self.put, "get": self.get, "resources": self.resources}
             if actor["role"] == "manager":
                 operations.update(member=self.member, start=self.start, status=self.status, assign=self.assign,
-                                  audit=self.audit_log, retry=self.retry, history=read_history, inspect=inspect_run, validate=self.validate,
+                                  audit=self.audit_log, retry=self.retry, history=read_history, progress=progress_page, inspect=inspect_run, validate=self.validate,
                                   fork=self.fork, checkpoints=positions)
             if action not in operations:
                 raise Refused("operation unavailable to this member")
@@ -165,8 +165,8 @@ class Collaboration:
         return {"run": run}
 
     @staticmethod
-    def fork(db, actor, run, at, inputs=None, execute=False):
-        result = fork_run(db, actor["project"], run, at, inputs, execute)
+    def fork(db, actor, run, at, inputs=None, execute=False, output=None):
+        result = fork_run(db, actor["project"], run, at, inputs, execute, output=output, actor=actor["name"])
         audit(db, actor["project"], actor["name"], "run.fork", result["run"],
               {"parent": run, "event": at, "execute": execute})
         return result

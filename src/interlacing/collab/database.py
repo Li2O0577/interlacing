@@ -114,12 +114,14 @@ class PostgresJournal:
     durable = True
     checkpoint_every = 64
 
-    def __init__(self, database: Database, lease: Lease, scope=()):
+    def __init__(self, database: Database, lease: Lease, scope=(), *, retry_authorization=0):
+        self.retry_authorization = retry_authorization
         self.database, self.lease, self.scope = database, lease, scope
         self.key = (lease.run, encoded(scope))
 
     def inner(self, node, round):
-        return type(self)(self.database, self.lease, (*self.scope, (node, round)))
+        return type(self)(self.database, self.lease, (*self.scope, (node, round)),
+                          retry_authorization=self.retry_authorization)
 
     def has_records(self):
         with self.database.connect() as db:

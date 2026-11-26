@@ -84,7 +84,8 @@ def function(d, catalog, graphs):
         outputs = list(read.outputs.values()) if outputs is None else outputs
         context = read.context if context is None else context
     return FunctionNode(d["id"], f, inputs=inputs, outputs=outputs, firing=d.get("firing"), context=bool(context),
-                        retry_attempts=d["config"].get("retry_attempts", 1))
+                        retry_attempts=d["config"].get("retry_attempts", 1),
+                        retry_on=d["config"].get("retry_on", ("connection", "timeout")))
 
 
 def _agent(d, catalog, area) -> dict:

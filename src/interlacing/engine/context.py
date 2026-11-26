@@ -101,11 +101,28 @@ class RunContext(Context):
     def change(self, change: Any) -> None:
         self._engine._change(self._state, change, self._act)
 
+    def progress(self, message: str) -> None:
+        if not isinstance(message, str) or not message.strip() or len(message) > 1024:
+            raise ValueError("progress requires a nonempty message of at most 1024 characters")
+        engine = self._engine
+        record = {"kind": "progress", "node": self.node, "round": self.round, "message": message}
+        with engine._lock:
+            engine._check_current(self._state)
+            if engine._recorder is not None:
+                engine._recorder.write(record)
+        if engine._observe is not None:
+            engine._tell("progress", node=self.node, round=self.round, message=message)
+
     def use(self, **amounts: float) -> None:
         self._engine._use(self._state, self.round, amounts)
 
     def once(self, name: str, do: Callable[[], Any]) -> Any:
         return self._engine._once(self._state, self.round, name, do)
+
+    @property
+    def retry_authorization(self) -> int:
+        recorder = self._engine._recorder
+        return getattr(recorder.journal, "retry_authorization", 0) if recorder else 0
 
     @property
     def key(self) -> str:

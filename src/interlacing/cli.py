@@ -143,6 +143,7 @@ def _parser() -> argparse.ArgumentParser:
     fork.add_argument("--at", required=True, type=int, metavar="EVENT")
     fork.add_argument("--input", action="append", metavar="NAME=VALUE", help="replace an unconsumed graph input")
     fork.add_argument("--inputs", metavar="FILE", help="a JSON file of replacement graph inputs")
+    fork.add_argument("--output", type=json.loads, help="JSON edit with node, token, version, value and reason")
     fork.add_argument("--execute", action="store_true", help="allow the fork to run node code when resumed")
     commands.add_parser("status", help="say where a run stands").add_argument("--dir", required=True)
     control = commands.add_parser("control", help="pause, resume, stop or restart nodes of a run")
@@ -252,7 +253,7 @@ def main(argv=None, out=None) -> int:
             elif args.command == "checkpoints":
                 state = Run(args.dir).checkpoints()
             elif args.command == "fork":
-                fork = Run(args.dir).fork(args.to, at=args.at, inputs=_inputs(args), execute=args.execute)
+                fork = Run(args.dir).fork(args.to, at=args.at, inputs=_inputs(args), execute=args.execute, output=args.output)
                 state = {"directory": str(fork.directory), **fork.checkpoints()}
             elif args.command == "files":
                 state = {"files": Run(args.dir).files()}

@@ -84,14 +84,30 @@ except ServiceError as error:
 
 对于向业务 API 发请求的同步函数节点，可设 `retry_attempts`（1 至 16，默认 1）。例如 `{"id":"price","kind":"function","function":"shop.quote","retry_attempts":3}`。该函数接受普通输入并返回 JSON 结果。遇到 `ConnectionError` 或 `TimeoutError` 时按指数退避重试，其他异常直接报告。每次完成的尝试都随激活记入日志；中断接管后沿用尝试次数和退避截止时间。外部有副作用的请求应携带业务幂等键，以覆盖外部服务响应到本地记账之间的崩溃窗口。带 `ctx` 的函数和异步函数仍自行管理重试。
 
-同步函数已耗尽自动尝试次数时，主管提交 `retry` 后，工作进程可能直接报告原失败，业务服务即使已经恢复也收不到新调用。另一个接口边界是 `start` 每次调用均创建新运行，响应丢失后重发相同请求可能重复执行。[两种行为的复现与验收条件](BRANCH_REVIEW.md)
+可用 `"retry_on": ["timeout"]` 只自动重试超时，也可选 `"connection"` 或两者。主管对失败运行发起 `retry` 后，已经耗尽预算的激活可以重新调用业务函数。数据库命令编号区分新授权与进程接管。已经成功并记账的调用继续复用原结果。创建运行的 `start` 暂无请求键，响应丢失后重发仍可能创建第二条运行。
+
+## 实时观察根运行
+
+主管使用 `Client.stream_progress` 获取运行状态、节点开始（`bind`）、提交（`act`）、投递、更正和自定义阶段。同步或异步业务节点可调用 `ctx.progress("已校验报价，正在生成复核摘要")`。阶段文本向本项目主管可见。激活在崩溃后重新进入时，可以再次报告同一阶段。
+
+```python
+cursor = 0
+for frame in client.stream_progress(run_id, after=cursor):
+    if frame["type"] == "event":
+        print(frame["seq"], frame["kind"], frame.get("node"), frame.get("message"))
+        cursor = frame["seq"]  # 在显示或处理成功后保存，重连时传回
+    else:
+        print(frame["state"])
+```
+
+`GET /v1/progress?run=UUID&after=N` 使用 Bearer 认证，按行传输 JSON。事件序号与根历史一致。状态帧携带当前状态及读到的位置，空闲时约每五秒发送一次。终态的最后一页发送完毕后关闭连接。HTTP 服务为每个订阅独立读取已提交事件，追上后每 250 毫秒检查一次。观察者断开不会取消执行。数据库历史分页仍可用于查看嵌套激活。此入口提供运行进度，模型逐 token 显示属于另一项能力。
 
 ## 远程检查、执行分叉与资料查找
 
 | 操作 | 输入及结果 |
 |---|---|
 | `checkpoints`、`inspect`（主管） | 按 `run` 列出根事件末尾与保留的检查点。`inspect(run, at)` 返回该事件的输出、待完成的激活、待返工项及能否分叉。`current_status` 是查询当下的运行状态。 |
-| `fork`（主管） | 提供 `run`、根事件序号 `at`，可选 `inputs` 替换尚未消费的图输入。默认创建可查看的预览，显式传 `execute: true` 会在独立运行中执行后续节点。结果含新运行 UUID 和来源位置。 |
+| `fork`（主管） | 提供 `run`、根事件序号 `at`，可选 `inputs` 替换尚未消费的图输入，或用 `output` 指定要修订的节点消息。默认创建可查看的预览，显式传 `execute: true` 会在独立运行中执行后续节点。结果含新运行 UUID 和来源位置。 |
 | `history`（主管） | 缺省读取根历史，可传 `scope: [["block",1],["child",1]]` 选择嵌套激活。运行中的作用域返回事件；已清理的子日志返回留存的溯源元数据，并标记 `archived: true`。两者都按 `seq` 分页。客户端的 `events` 可用游标继续轮询。 |
 | `resources`（项目成员、主管） | `namespace` 选 shared 或 personal。`prefix` 按名称前缀过滤，`query` 对名称与 JSON 文本执行不区分大小写的子串匹配。文件只匹配名称。结果含名称、版本和种类，下一页将 `next` 传为 `after`。使用 `get` 取回选定版本。 |
 
@@ -105,6 +121,18 @@ matches = client.request("resources", namespace="shared", query="报价", limit=
 for item in matches["items"]:
     print(item["name"], item["version"])
 ```
+
+### 从已审核的中间结论建立新分支
+
+从 `history` 取目标 `deliver` 的 `node` 和 `token`。首次投递是版本 1，后续 `correct` 记录给出新版本。选择该消息已提交且 `inspect(at)` 返回 `forkable` 的位置。以下假设报价节点已发出一条名为 `price#1` 的消息。
+
+```python
+edit = {"node": "quote", "token": "price#1", "version": 1,
+        "value": 120, "reason": "供应商补发了含税报价单"}
+branch = client.request("fork", run=run_id, at=position, output=edit, execute=True)
+```
+
+新运行记录主管身份和理由，按实际读取关系及原图的更正策略投递。默认要求返工的下游若已审核，会在分叉中收到新任务。原运行的签字和历史继续可查。省略 `execute` 可先预览，预览不会调度节点。本地持久化 SQLite 入口为 `Run.fork(..., output=edit)` 或 `interlacing fork --output '<JSON>'`，本地编辑者记为 `local`。首版支持静态根图上经普通前向 value 边传递的 JSON，以及直接图输出。要求稳定位置、匹配的消息版本、端口类型和修改理由；自定义输出校验、回边和 artifact 投递需要另外支持。部署时服务和工作进程使用同一版本。
 
 ## 提交与接管
 

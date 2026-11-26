@@ -148,9 +148,15 @@ def explain_records(graph: dict, records: Iterable[dict], status: str, questions
                 event["took"] = record["took"]
                 if "redo" in record:
                     event["reworks_round"] = int(record["redo"])
+            if kind == "deliver":
+                event.update(token=record["token"], version=1)
             if kind == "correct":
                 event.update(token=record["token"], version=record["version"], noop=record["noop"])
                 event["revised_outputs"] = [{"output": name, "index": index} for name, index, _ in record["outputs"]]
+            if kind == "progress":
+                event["message"] = record["message"]
+            if kind == "correct" and "external" in record:
+                event["external"] = record["external"]
             if kind == "fork":
                 event["origin"] = record["origin"]
                 event["inputs"] = [item[0].removeprefix(INPUT) for item in record["sent"]]

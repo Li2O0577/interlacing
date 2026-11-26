@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from ..engine.durable import DurableState
 from ..engine.wiring import INPUT
+from ..forking import output_correction
 from ..runs import fork_inputs
 from ..spec import SpecError, load
 from .database import Refused, encoded
@@ -25,7 +26,7 @@ def positions(db, actor, run):
     return {"last_event": last, "checkpoints": [r["seq"] for r in points]}
 
 
-def fork_run(db, project, run, at, inputs, execute):
+def fork_run(db, project, run, at, inputs, execute, *, output=None, actor=None):
     if type(at) is not int or at < 1 or type(execute) is not bool:
         raise ValueError("provide a positive event number and a boolean execute")
     if inputs is not None and not isinstance(inputs, dict):
@@ -62,13 +63,14 @@ def fork_run(db, project, run, at, inputs, execute):
     if header is None:
         raise ValueError("run has no committed header")
     description = source["description"]
-    if overrides and description is None:
+    if (overrides or output is not None) and description is None:
         # Runs written before schema v2 did not retain the compiled port schemas.
         try:
             description = load(source["graph"]).describe()
         except SpecError as exc:
             raise ValueError("legacy run lacks compiled input schemas for these overrides") from exc
     sent = fork_inputs(description, state, overrides) if overrides else []
+    correction = output_correction(description, state, output, actor=actor)
     branch = str(uuid4())
     origin = {"run": str(run), "event": at, "run_id": header["id"], "scope_id": header["scope_id"]}
     fresh = {**header, "id": token_hex(8), "scope_id": token_hex(16),
@@ -88,7 +90,11 @@ def fork_run(db, project, run, at, inputs, execute):
     db.execute("INSERT INTO il_events VALUES (%s,'[]',%s,%s)", (branch, at+1, encoded(marker)))
     state.data["run"]["id"] = fresh["id"]
     state.apply(marker)
-    db.execute("INSERT INTO il_checkpoints VALUES (%s,'[]',%s,%s)", (branch, at+1, encoded(state.data)))
+    if correction:
+        db.execute("INSERT INTO il_events VALUES (%s,'[]',%s,%s)", (branch, at+2, encoded(correction)))
+        state.apply(correction)
+        revisions.update(p[5] for p, route in zip(correction["sent"], correction["routes"]) if route == "rerun")
+    db.execute("INSERT INTO il_checkpoints VALUES (%s,'[]',%s,%s)", (branch, state.seq, encoded(state.data)))
     for delivery in revisions:
         db.execute("INSERT INTO il_revisions VALUES (%s,'[]',%s)", (branch, delivery))
     if execute:
@@ -148,3 +154,21 @@ def inspect_run(db, actor, run, at=None):
             "rework": state.rework.jobs(), "outputs": {name: [body[1] if body[0] == "v" else
              {"digest": body[1], "size": body[2], "media": body[3]} for body in bodies]
              for name, bodies in state.data["outputs"].items()}}
+
+
+def progress_page(db, actor, run, after=0):
+    """Read one consistent page of root progress, projecting away business payloads in SQL."""
+    if type(after) is not int or after < 0:
+        raise ValueError("after must be a nonnegative event number")
+    source = db.execute("SELECT state FROM il_runs WHERE id=%s AND project=%s",
+                        (UUID(str(run)), actor["project"])).fetchone()
+    if not source:
+        raise Refused("run unavailable")
+    if after and not db.execute("SELECT 1 FROM il_events WHERE run=%s AND scope='[]' AND seq=%s",
+                                (run, after)).fetchone():
+        raise ValueError("progress cursor outside run history")
+    events = db.execute("SELECT seq, record->>'kind' AS kind, record->>'node' AS node, record->'round' AS round, "
+                        "CASE WHEN record->>'kind'='progress' THEN record->>'message' END AS message "
+                        "FROM il_events WHERE run=%s AND scope='[]' AND seq>%s ORDER BY seq LIMIT 100",
+                        (run, after)).fetchall()
+    return {"state": source["state"], "events": [{k: v for k, v in row.items() if v is not None} for row in events]}

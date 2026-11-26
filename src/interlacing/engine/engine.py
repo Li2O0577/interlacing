@@ -2014,19 +2014,7 @@ class Engine:
 
     def _correction_route(self, feed: Feed, envelope: str) -> str:
         assert self._durable is not None
-        rework = self._durable.rework
-        if envelope in self._durable.reviews.unanswered:
-            return "answer"
-        reader = rework.readers.get(envelope)
-        if reader is None:
-            return "unread" if envelope in self._durable.data["mail"] else "ignore"
-        node, round = reader
-        policy = feed.port.state.node.on_correction
-        if policy == "ignore":
-            return "ignore"
-        if policy == "rerun" and rework.readings[node][round]["replayable"]:
-            return "rerun"
-        return "tell"                      # a saved continuation or graph edit cannot be repeated
+        return self._durable.correction_route(envelope, feed.port.state.node.on_correction)
 
     def _apply_correction(self, feed: Feed, envelope: Envelope, route: str) -> None:
         if route in ("answer", "refused"):

@@ -2,6 +2,7 @@
 import json
 import time
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -20,9 +21,12 @@ class Client:
         body = json.dumps({"action": action, "args": args}, allow_nan=False).encode()
         request = Request(self.url, data=body, headers={"Content-Type": "application/json",
                                                         "Authorization": "Bearer " + self.token})
+        with self._open(request) as response:
+            return json.load(response)
+
+    def _open(self, request):
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                return json.load(response)
+            return urlopen(request, timeout=self.timeout)
         except HTTPError as exc:
             with exc:
                 try:
@@ -49,3 +53,17 @@ class Client:
                 if finished:
                     return
                 time.sleep(interval)
+
+    def stream_progress(self, run, *, after=0):
+        """Read live root event and status frames. Reconnect using the last event's seq."""
+        url = self.url.rsplit("/", 1)[0] + "/progress?" + urlencode({"run": run, "after": after})
+        request = Request(url, headers={"Authorization": "Bearer " + self.token})
+        with self._open(request) as response:
+            for line in response:
+                frame = json.loads(line)
+                if frame["type"] == "error":
+                    raise ServiceError(503, "stream_interrupted", frame["error"])
+                yield frame
+                if frame["type"] == "status" and frame["state"] in ("done", "stopped", "failed", "preview"):
+                    return
+        raise ServiceError(503, "stream_interrupted", "progress connection closed before terminal status")

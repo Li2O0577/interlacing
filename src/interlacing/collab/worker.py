@@ -59,6 +59,11 @@ def execute(database: Database, lease: Lease, *, seconds=30, allow=(), models=No
         run = db.execute("SELECT graph,inputs,project,assignments,workers,description IS NULL AS first_load "
                          "FROM il_runs WHERE id=%s", (lease.run,)).fetchone()
 
+        authorization = db.execute("SELECT COALESCE(MAX(id),0) AS id FROM il_commands "
+                                   "WHERE run=%s AND id<=%s AND key LIKE 'retry/%%'",
+                                   (lease.run, lease.command)).fetchone()["id"]
+    journal = PostgresJournal(database, lease, retry_authorization=authorization)
+
     def ask(node, turn, request, schema):
         with database.fenced(lease) as db:
             task = db.execute("SELECT * FROM il_tasks WHERE run=%s AND node=%s AND turn=%s",
@@ -115,7 +120,7 @@ def execute(database: Database, lease: Lease, *, seconds=30, allow=(), models=No
             with database.fenced(lease) as db:
                 db.execute("UPDATE il_runs SET description=%s WHERE id=%s AND description IS NULL",
                            (encoded(graph.describe()), lease.run))
-            engine = Engine(graph, catalog.protocols, workers=run["workers"], journal=PostgresJournal(database, lease),
+            engine = Engine(graph, catalog.protocols, workers=run["workers"], journal=journal,
                             stopping=lost.is_set,
                             rebuild=lambda spec: load_node(spec, catalog))
             result = engine.go(run["inputs"])

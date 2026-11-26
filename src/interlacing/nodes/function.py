@@ -34,7 +34,8 @@ class FunctionNode(Node):
     kind = "function"
 
     def __init__(self, id: str, function: Callable, *, inputs: Iterable[Port] = (), outputs: Iterable[Port] = (),
-                 firing: Firing | None = None, context: bool = False, retry_attempts: int = 1):
+                 firing: Firing | None = None, context: bool = False, retry_attempts: int = 1,
+                 retry_on=("connection", "timeout")):
         if isinstance(function, FunctionNode):
             function = function.function   # a function made into a node with @node: the function itself
         if not callable(function):
@@ -46,11 +47,16 @@ class FunctionNode(Node):
             raise NodeError(f"{id}: retry_attempts must be an integer from 1 to 16")
         if retry_attempts > 1 and (context or self.asynchronous):
             raise NodeError(f"{id}: retry_attempts requires a synchronous function without context")
+        if not isinstance(retry_on, (list, tuple)) or not retry_on or any(
+                name not in ("connection", "timeout") for name in retry_on):
+            raise NodeError(f"{id}: retry_on must list connection or timeout")
+        self.retry_on = tuple(sorted(set(retry_on)))
         self.retry_attempts = retry_attempts
         self._sends = [name for name, port in self.outputs.items() if not port.call]
 
     def config(self) -> Mapping:
         return {"function": named(self.function), "context": self.context,
+                **({"retry_on": list(self.retry_on)} if self.retry_on != ("connection", "timeout") else {}),
                 **({"retry_attempts": self.retry_attempts} if self.retry_attempts > 1 else {})}
 
     @property
@@ -67,28 +73,37 @@ class FunctionNode(Node):
         return self._shaped(result)
 
     def _retry(self, ctx, inputs):
-        # Log each completed attempt. On replay the activation reads the same outcome
-        # and deadline, even if a different worker has taken ownership.
-        for attempt in range(1, self.retry_attempts + 1):
-            def invoke():
-                try:
-                    return {"value": self.function(**inputs)}
-                except (ConnectionError, TimeoutError) as exc:
-                    delay = min(5.0, 0.1 * 2 ** (attempt - 1))
-                    return {"error": str(exc), "timeout": isinstance(exc, TimeoutError),
-                            "next": time.time() + delay}
-            outcome = ctx.once(f"function-attempt-{attempt}", invoke)
-            if "value" in outcome:
-                return self._shaped(outcome["value"])
-            if attempt == self.retry_attempts:
+        authorization = getattr(ctx, "retry_authorization", 0)
+        budget = 0
+        while True:
+            prefix = f"function-retry-{budget}-attempt" if budget else "function-attempt"
+            for attempt in range(1, self.retry_attempts + 1):
+                outcome = ctx.once(f"{prefix}-{attempt}", lambda: self._attempt(inputs, attempt, authorization))
+                if "value" in outcome:
+                    return self._shaped(outcome["value"])
+                if attempt < self.retry_attempts:
+                    while (remaining := outcome["next"] - time.time()) > 0:
+                        if ctx.stopping():
+                            return None
+                        time.sleep(min(remaining, 0.05))
+                    if ctx.stopping():
+                        return None
+            if authorization <= outcome.get("authorization", 0):
                 error = TimeoutError if outcome["timeout"] else ConnectionError
-                raise error(f"{self.id} exhausted {attempt} attempts: {outcome['error']}")
-            while (remaining := outcome["next"] - time.time()) > 0:
-                if ctx.stopping():
-                    return None
-                time.sleep(min(remaining, 0.05))
-            if ctx.stopping():
-                return None
+                raise error(f"{self.id} exhausted {self.retry_attempts} attempts: {outcome['error']}")
+            # Follow committed budgets in order, even if another command took over later.
+            budget = ctx.once(f"function-retry-after-{budget}", lambda: authorization)
+
+    def _attempt(self, inputs, attempt, authorization):
+        try:
+            return {"value": self.function(**inputs)}
+        except (ConnectionError, TimeoutError) as exc:
+            timeout = isinstance(exc, TimeoutError)
+            if ("timeout" if timeout else "connection") not in self.retry_on:
+                raise
+            delay = min(5.0, 0.1 * 2 ** (attempt - 1))
+            return {"error": str(exc), "timeout": timeout, "next": time.time() + delay,
+                    "authorization": authorization}
 
     def _shaped(self, result) -> Mapping[str, Any] | None:
         if result is None:

@@ -6,6 +6,7 @@ import os
 import socket
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from .database import Database, LostLease, Refused
@@ -43,6 +44,59 @@ def server(database, port):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_GET(self):
+            url = urlsplit(self.path)
+            if url.path != "/v1/progress":
+                return self.reply(404, {"code": "not_found", "error": "unknown endpoint"})
+            scheme, _, token = self.headers.get("Authorization", "").partition(" ")
+            if scheme.lower() != "bearer" or not token:
+                return self.reply(401, {"code": "credentials_required", "error": "member credentials required"})
+            try:
+                params = parse_qs(url.query, strict_parsing=True)
+                run, = params["run"]
+                cursor, = params.get("after", ["0"])
+                after = int(cursor)
+                def page():
+                    return service.request(token, "progress", {"run": run, "after": after})
+                batch = page()
+            except Refused as exc:
+                return self.reply(403, {"code": "request_refused", "error": str(exc)})
+            except (KeyError, ValueError) as exc:
+                return self.reply(400, {"code": "invalid_request", "error": str(exc)})
+            except database.driver.Error:
+                return self.reply(503, {"code": "database_unavailable", "error": "database request failed"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            self.connection.settimeout(10)
+
+            def send(frame):
+                self.wfile.write(json.dumps(frame, ensure_ascii=False).encode() + b"\n")
+                self.wfile.flush()
+
+            previous = None
+            heartbeat = time.monotonic()
+            try:
+                while True:
+                    for event in batch["events"]:
+                        after = event["seq"]
+                        send({"type": "event", **event})
+                    if len(batch["events"]) < 100:
+                        state = batch["state"]
+                        if state != previous or time.monotonic() - heartbeat >= 5:
+                            send({"type": "status", "state": state, "after": after})
+                            heartbeat, previous = time.monotonic(), state
+                        if state in ("done", "stopped", "failed", "preview"):
+                            return
+                        time.sleep(0.25)
+                    batch = page()
+            except (Refused, database.driver.Error):
+                send({"type": "error", "error": "progress subscription interrupted"})
+            except OSError:
+                return
 
         def do_POST(self):
             if self.path != "/v1/request":

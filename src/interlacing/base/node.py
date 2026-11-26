@@ -203,6 +203,9 @@ class Context(ABC):
         activation and made again when the run is taken up."""
         raise NotImplementedError("this context cannot change its graph")
 
+    def progress(self, message: str) -> None:
+        """Publish a short display message. An interrupted activation can report the same stage again."""
+
     def use(self, **amounts: float) -> None:
         """Report what this activation used up, under names of the node's choosing (``tokens=1200``,
         ``calls=1``, ``seconds=3.5``). The run adds it up; when a total goes over the run's budget for that

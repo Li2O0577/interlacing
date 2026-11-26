@@ -198,6 +198,8 @@ $ interlacing resume --dir variant-run
 
 `fork` 需要一个新目录和当时没有未完成激活的事件。可更换该位置尚未消费的图输入，在事件 `1` 也可提供原先遗漏的图输入。分叉有独立日志、运行编号和工作区，并记录父运行及事件。工作区文件和人工问答没有历史快照。省略 `--execute` 时分叉只供查看。显式选择 `--execute` 后，`resume` 会按照继承的运行权限执行节点，节点可以产生外部副作用。Python 调用对应 `Run.checkpoints()`、`Run.show(at=...)` 和 `Run.fork(..., at=..., inputs=..., execute=True)`。
 
+要从中间结论另试一条路线，可在静态根图中选择已稳定的事件，将 `{"node":"quote","token":"price#1","version":1,"value":120,"reason":"报价更新"}` 传入 `Run.fork(..., output=edit)`，或将对应 JSON 交给 `fork --output`。普通前向 value 边沿用原有更正策略。已读过报价的下游可以重新审核，独立工作保留。详见[服务端示例](POSTGRES.md)。
+
 用 `interlacing show --dir demo-run` 可以按输入端口查看已记录的投递。等待审批时，`publish.note` 已收到来自 `draft.note` 的投递，`publish.verdict` 还在等 `editor.answer` 的首次投递记录。命令仅读取保存的图和完整日志行，无需加载节点代码。正在运行时展示的也是已落盘的证据。图中的增删节点与接线会根据已提交的变更重建。
 
 加 `--timeline` 按日志顺序看激活轮次、质疑与答复、节点开关和上报用量。新日志的 `elapsed_seconds` 是本次激活记录片段的墙钟耗时（包括等待）；旧记录没有耗时字段。失败运行另有 `failure`。用 `--format mermaid` 或 `--format dot` 导出节点与端口连线。若外部替换图只留下摘要，输出会标明最后已知拓扑。[模拟结果的两种审查路径](../examples/graphs/simulation_review.py)
