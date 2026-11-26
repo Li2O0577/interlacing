@@ -13,11 +13,10 @@ import time
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from ..base import Envelope, Protocol
-from .journal import JournalBackend, history_record, pack, pack_body, unpack_body
+from .journal import CheckpointJournal, JournalBackend, history_record, pack, pack_body, unpack_body
 from .ledger import Ledger
 from .result import Result
 from .scheduler import Scheduler
-from .sqlite import SQLiteJournal
 from .wiring import ACTIVE, PAUSED, STOPPED, Reading, Sent, Wiring, bounded
 
 if TYPE_CHECKING:
@@ -66,7 +65,7 @@ class Recorder:
         self.journal.write({"schema_version": 1, **record})
         if self.durable is not None:
             self.durable.apply(record)
-            assert isinstance(self.journal, SQLiteJournal)
+            assert isinstance(self.journal, CheckpointJournal)
             if self.durable.seq == 1 or self.durable.seq % self.journal.checkpoint_every == 0:
                 self.journal.checkpoint(self.durable.data)
 
@@ -127,7 +126,7 @@ class Recorder:
 
     def checkpoint(self) -> None:
         if self.durable is not None and self.durable.seq:
-            assert isinstance(self.journal, SQLiteJournal)
+            assert isinstance(self.journal, CheckpointJournal)
             if self.durable.seq % self.journal.checkpoint_every:
                 self.journal.checkpoint(self.durable.data)
 

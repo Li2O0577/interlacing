@@ -210,6 +210,8 @@ $ interlacing resume --dir variant-run
 
 **试用 MCP 审查模拟。** 在 `examples/data` 中启动服务，让客户端以 stdio 运行 `python -m interlacing.cli serve --runs /绝对路径/runs --allow steps`。将 [cooling_review.json](../examples/data/cooling_review.json) 的内容作为 `start.graph`，输入 `{"steps":100}`。B1 会收到 B2 的初稿 36.6032。用同一运行编号调用 `show`（`timeline: true`），可看到 B2 已经运行、B1 正在等人。在这个示例里，初稿误把百分数当作比例。用 `answer` 提交 `{"units":"percent","reading":36.6032}`，再调 `resume`。完成后的 `outputs.report` 只含 0.366，`used.simulations` 为 1。
 
+PostgreSQL 协作服务支持项目成员、人工任务认领和多个工作进程。[启动方法和 HTTP 接口](POSTGRES.md)
+
 <a id="maintain"></a>
 
 ## 9 · 维护地图和排错

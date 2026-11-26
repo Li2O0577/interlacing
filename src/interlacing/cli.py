@@ -172,6 +172,8 @@ def _parser() -> argparse.ArgumentParser:
     served.add_argument("--make", action="store_true", help="call the target to make the node")
     served.add_argument("--token-env", default="INTERLACING_TOKEN", metavar="NAME",
                         help="the environment variable holding the token clients must give (default: INTERLACING_TOKEN)")
+    from .collab.cli import arguments
+    arguments(commands)
     return parser
 
 
@@ -212,6 +214,9 @@ def main(argv=None, out=None) -> int:
     if os.getcwd() not in sys.path:
         sys.path.insert(0, os.getcwd())       # as with python -m: a module beside where the command is run can be named
     try:
+        if args.command == "collab":
+            from .collab.cli import dispatch
+            return dispatch(args, out)
         if args.command == "guide":
             from .spec import Catalog, guide
             out.write(guide(Catalog(allow=args.allow)))

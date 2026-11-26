@@ -7,6 +7,14 @@ from typing import Any
 from ..base import NodeError
 
 
+class WaitingForTasks(BaseException):
+    """Durable activations waiting for external answers, including inside nested graphs."""
+
+    def __init__(self, tasks: list[str]):
+        super().__init__(tasks)
+        self.tasks = tasks
+
+
 class OverBudget(NodeError):
     """Raised in a node when what it reports using takes the run over its budget. The run has failed by
     then; the node should return."""

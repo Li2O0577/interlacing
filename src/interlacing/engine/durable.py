@@ -6,10 +6,9 @@ import json
 from typing import TYPE_CHECKING
 
 from ..base import NodeError, canonical
-from .journal import pack_body, unpack_body
+from .journal import CheckpointJournal, pack_body, unpack_body
 from .recorder import _envelope
 from .rework import Rework
-from .sqlite import SQLiteJournal
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -40,7 +39,7 @@ class DurableState:
         }))
 
     @classmethod
-    def load(cls, journal: SQLiteJournal, *, at: int | None = None) -> tuple[int | None, DurableState]:
+    def load(cls, journal: CheckpointJournal, *, at: int | None = None) -> tuple[int | None, DurableState]:
         checkpoint, records = journal.recovery(at=at, required="rework")
         position = checkpoint["seq"] if checkpoint is not None else None
         state = cls(checkpoint)

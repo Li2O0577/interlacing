@@ -210,6 +210,8 @@ Exit codes for `run/resume`: `0` completed, `1` failed or refused, `3` waiting f
 
 **Try the simulation review over MCP.** From `examples/data`, configure the client to launch `python -m interlacing.cli serve --runs /absolute/path/to/runs --allow steps` over stdio. Pass the contents of [cooling_review.json](../examples/data/cooling_review.json) as `start.graph` with inputs `{"steps":100}`. B1 receives B2’s draft, 36.6032. Call `show` with the run ID and `timeline: true` to see that B2 ran and B1 awaits a person. In this example the draft used a percentage as a fraction. Submit `{"units":"percent","reading":36.6032}` with `answer`, then call `resume`. The final `outputs.report` contains only 0.366 and `used.simulations` is 1.
 
+Use the PostgreSQL collaboration service for project memberships, human task assignment and multiple workers. [Operator guide and HTTP API](POSTGRES.md)
+
 <a id="maintain"></a>
 
 ## 9 · Maintainer map and troubleshooting

@@ -18,7 +18,7 @@ import os
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from ..base import Envelope, Ref
 from .stream import Stream
@@ -58,6 +58,18 @@ class JournalBackend(Protocol):
     def prune_empty_inner(self) -> None:
         """Release unused child storage when this run ends."""
         ...
+
+
+@runtime_checkable
+class CheckpointJournal(JournalBackend, Protocol):
+    """A sequenced journal with durable delivery and recovery snapshots."""
+
+    durable: bool
+    checkpoint_every: int
+
+    def has_records(self) -> bool: ...
+    def recovery(self, *, at: int | None = None, required: str | None = None) -> tuple[dict | None, list[dict]]: ...
+    def checkpoint(self, state: dict) -> None: ...
 
 
 class Journal:

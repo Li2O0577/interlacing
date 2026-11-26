@@ -111,13 +111,12 @@ from .checks import Checks
 from .clock import overrun, set_limits
 from .context import RunContext
 from .durable import DurableState, copy_body, payload_key
-from .journal import JournalBackend, pack, pack_body, unpack_body
+from .journal import CheckpointJournal, JournalBackend, pack, pack_body, unpack_body
 from .ledger import Ledger, amounts
 from .recorder import Act, Recorder, _envelope, restore, under
 from .rework import Superseded
-from .result import OverBudget, Result, RunError
+from .result import OverBudget, Result, RunError, WaitingForTasks
 from .scheduler import Scheduler
-from .sqlite import SQLiteJournal
 from .stream import Stream
 from .transport import Transport
 from .recorder import SWITCHED
@@ -151,6 +150,7 @@ class Engine:
         self._observe = observe
         self._ledger = Ledger(budget)
         self._id: str | None = None         # names this run: the first part of every activation's key
+        self._waiting_tasks: list[str] = []
         self._limit = time_limit
         self._firm = bool(firm)             # no node may give itself longer than time_limit
         self._parent: tuple | None = None   # (outer engine, the outer node's state, its activation's record)
@@ -159,7 +159,7 @@ class Engine:
         self._alive = 0                   # worker threads that have not returned
         self._outer = stopping
         self._carry = transport.carry if transport is not None else None
-        self._durable = DurableState() if isinstance(journal, SQLiteJournal) and journal.durable else None
+        self._durable = DurableState() if isinstance(journal, CheckpointJournal) and journal.durable else None
         self._recorder = Recorder(journal, self._durable) if journal is not None else None
         if self._durable is not None:
             self._check_durable_graph(graph)
@@ -262,7 +262,7 @@ class Engine:
     def _feed(self, inputs: Mapping[str, Any] | None) -> None:
         """Start a new run: put the graph's inputs in and queue what can run."""
         recorder = self._recorder
-        if recorder is not None and (recorder.journal.has_records() if isinstance(recorder.journal, SQLiteJournal)
+        if recorder is not None and (recorder.journal.has_records() if isinstance(recorder.journal, CheckpointJournal)
                                      else bool(recorder.read())):
             raise RunError("the journal already holds a run: resume it, or use a new journal")
         inputs = dict(inputs or {})
@@ -298,7 +298,7 @@ class Engine:
         recorder = self._recorder
         if recorder is not None:
             if self._durable is not None and not fresh:
-                assert isinstance(recorder.journal, SQLiteJournal)
+                assert isinstance(recorder.journal, CheckpointJournal)
                 return recorder.journal.has_records()
             records = recorder.read()
             if records:
@@ -321,7 +321,7 @@ class Engine:
     def _restore_durable(self, recorder: Recorder, change: bool) -> bool:
         if change:
             raise RunError("resume the original durable graph before changing it through ctx.change")
-        assert isinstance(recorder.journal, SQLiteJournal)
+        assert isinstance(recorder.journal, CheckpointJournal)
         _, restored = DurableState.load(recorder.journal)
         start = restored.data["run"]
         if start is None:
@@ -1059,6 +1059,8 @@ class Engine:
             if cause is not None and not isinstance(cause, Exception):
                 raise cause                 # an interrupt or an exit request passes through as itself
             raise self._error
+        if self._waiting_tasks:
+            raise WaitingForTasks(self._waiting_tasks)
         result.envelopes = self._sched.envelopes
         result.rounds = {id: state.round for id, state in self._states.items() if state.round}
         result.limited = tuple(self._limited)
@@ -1416,6 +1418,14 @@ class Engine:
         if state.reviews.pending and state.status == STOPPED:
             with lock:
                 self._unheard(state, "the sender was stopped, and cannot answer")
+        if isinstance(failure, WaitingForTasks) and self._durable is not None:
+            with lock:
+                if self._over:
+                    return False
+                self._waiting_tasks.extend(failure.tasks)
+                state.status = PAUSED  # this drive only: the durable binding is replayed when a command arrives
+                self._release(state)
+            return True
         if failure is not None:
             with lock:
                 if self._over:

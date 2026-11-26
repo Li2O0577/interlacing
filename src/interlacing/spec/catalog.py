@@ -49,8 +49,9 @@ class Catalog:
                  models: Callable[[str], Any] | None = None, ask: Callable[[str, int, Any], Any] | None = None,
                  protocols: Protocols = DEFAULT, files=None, defaults: Mapping[str, Mapping] | None = None,
                  workspace=None, max_workers: int | None = None, tools=None, apps=None, remotes: Iterable[str] = (),
-                 templates: Mapping[str, Mapping] | None = None):
+                 templates: Mapping[str, Mapping] | None = None, ask_typed: Callable | None = None):
         self.allow, self.processes, self.max_workers = tuple(allow), bool(processes), max_workers
+        self.ask_typed = ask_typed
         self.files = Path(files).resolve() if files is not None else None
         self.defaults = {kind: dict(settings) for kind, settings in (defaults or {}).items()}
         self.models, self.ask = models, ask

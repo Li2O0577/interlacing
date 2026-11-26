@@ -203,7 +203,11 @@ def human(d, catalog, graphs):
     node = HumanNode(d["id"], catalog.function(name) if name else None,
                      request=_first_schema(d, "inputs"), answer=_first_schema(d, "outputs"))
     if not name:
-        node.host = catalog.ask
+        if catalog.ask_typed is None:
+            node.host = catalog.ask
+        else:
+            answer = node.outputs["answer"].schema.describe()
+            node.host = lambda where, turn, request: catalog.ask_typed(where, turn, request, answer)
     return node
 
 
