@@ -172,3 +172,24 @@ def unpack_body(packed: list, protocol=None, port=None) -> Any:
 def pack(envelope: Envelope) -> list:
     packed = [envelope.edge, envelope.seq, envelope.round, pack_body(envelope.body), list(envelope.cause)]
     return [*packed, envelope.replaces] if envelope.replaces else packed
+
+
+def history_record(record: dict, seq: int) -> dict:
+    """Keep provenance references without message bodies, snapshots or node definitions."""
+    kind = record["kind"]
+    event = {"seq": seq, "kind": kind, "schema_version": record.get("schema_version", 0)}
+    if kind == "run":
+        event.update(run_id=record.get("id"), scope_id=record.get("scope_id"))
+    if kind in ("run", "act"):
+        event["deliveries"] = [
+            [f"{item[0]}#{item[1]}", item[5] if len(item) > 5 else None]
+            for item in record.get("sent", ())
+        ]
+    if kind == "act":
+        event.update(node=record["node"], round=record.get("round"), reads=record.get("took"),
+                     emits=record.get("emits", []), outputs=[name for name, _ in record.get("out", ())],
+                     output_indices=record.get("out_indices"),
+                     revised_outputs=[[name, index] for name, index, _ in record.get("fixed_out", ())])
+        if record.get("child_history"):
+            event["child_history"] = record["child_history"]
+    return event

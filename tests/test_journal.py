@@ -337,7 +337,7 @@ def test_a_run_continues_under_a_changed_graph(tmp_path):
     assert result.outputs == {'out': ['checked 2'], 'audit': []}      # audit's edge is new: draft does not run again for it
     assert result.rounds == {'draft': 1, 'check': 1} and result.complete
     change = [r for r in records(path) if r['kind'] == 'change']
-    assert change == [{'kind': 'change', 'from': old.digest, 'graph': new.digest, 'dropped': 0}]
+    assert change == [{'schema_version': 1, 'kind': 'change', 'from': old.digest, 'graph': new.digest, 'dropped': 0}]
     assert Engine(new, DEFAULT, journal=Journal(path)).resume().outputs == {'out': ['checked 2'], 'audit': []}
 
     # dropping an edge drops what was waiting on it, and says how much

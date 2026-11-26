@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable
 from pathlib import Path
 
-from .engine.journal import Journal, JournalError
+from .engine.journal import Journal, JournalError, history_record
 from .engine.wiring import INPUT
 
 
@@ -52,6 +52,69 @@ def explain(graph: dict, path: Path, status: str, questions: list, *, timeline: 
     return explain_records(graph, Journal(path).inspect(), status, questions, timeline=timeline)
 
 
+def _provenance(history: list[dict]) -> dict:
+    """Index recorded reads and output versions within a single journal scope."""
+    start = next((event for event in history if event["kind"] == "run"), {})
+    delivery_sources: dict[str, list[dict]] = defaultdict(list)
+    activations = []
+    outputs: dict[str, list[list[dict]]] = defaultdict(list)
+    output_counts: dict[str, int] = defaultdict(int)
+    children: dict[tuple, tuple[int, list[dict]]] = {}
+    for event in history:
+        seq = event["seq"]
+        output_messages: dict[tuple, deque] = defaultdict(deque)
+        delivery_messages: dict[str, list[dict]] = defaultdict(list)
+        for ordinal, (token, _, envelopes, slots) in enumerate(event.get("emits", ()), 1):
+            message = {"token": token, "ordinal": ordinal}
+            for _, delivery in envelopes:
+                delivery_messages[delivery].append(message)
+            for name, index in slots:
+                output_messages[name, index].append(message)
+        for delivery, replaces in event.get("deliveries", ()):
+            messages = delivery_messages[delivery]
+            delivery_sources[delivery].append({"event_seq": seq, "replaces": replaces,
+                                                "message": messages[0] if len(messages) == 1 else None})
+        if event["kind"] == "act":
+            activations.append({"event_seq": seq, "node": event["node"], "round": event["round"],
+                                "reads": event["reads"]})
+        written = []
+        indices = event.get("output_indices")
+        for position, name in enumerate(event.get("outputs", ())):
+            index = indices[position] if indices is not None else output_counts[name]
+            output_counts[name] = max(output_counts[name], index + 1)
+            written.append((name, index))
+        for name, index in [*written, *event.get("revised_outputs", ())]:
+            # A legacy or changed graph can have revisions to slots whose origin is absent.
+            while index >= len(outputs[name]):
+                outputs[name].append([])
+            versions = outputs[name][index]
+            slot_messages = output_messages[name, index]
+            versions.append({"event_seq": seq, "message": slot_messages.popleft() if slot_messages else None,
+                             "replaces_event_seq": versions[-1]["event_seq"] if versions else None})
+        for index, child in enumerate(event.get("child_history", ())):
+            scope = next((entry["scope_id"] for entry in child if entry["kind"] == "run"), None)
+            key = ("scope", scope) if scope else ("position", seq, index)
+            root_seq = children[key][0] if key in children else seq
+            children[key] = root_seq, child
+
+    # A consumer can finish journaling before the sender. Resolve against the whole viewed prefix.
+    for activation in activations:
+        reads = activation["reads"]
+        if reads is None:
+            continue
+        resolved = []
+        for delivery in reads:
+            sources = delivery_sources.get(delivery, [])
+            read = {"delivery": delivery, "source": sources[0] if len(sources) == 1 else None}
+            if len(sources) != 1:
+                read["status"] = "ambiguous" if sources else "not_recorded"
+            resolved.append(read)
+        activation["reads"] = resolved
+    return {"run_id": start.get("run_id"), "scope_id": start.get("scope_id"),
+            "activations": activations, "outputs": dict(outputs),
+            "children": [{"parent_event_seq": seq, **_provenance(child)} for seq, child in children.values()]}
+
+
 def explain_records(graph: dict, records: Iterable[dict], status: str, questions: list, *, timeline: bool = False) -> dict:
     """First-activation dependencies in the saved graph, with historical delivery evidence."""
     sent: set[str] = set()
@@ -62,13 +125,15 @@ def explain_records(graph: dict, records: Iterable[dict], status: str, questions
     edges = {e["id"]: e for e in graph["edges"]}
     inputs_map, outputs = dict(graph["inputs"]), dict(graph["outputs"])
     managers = {member: manager for manager, team in graph.get("manages", {}).items() for member in team}
-    events = []
-    for record in records:
+    events, history = [], []
+    for seq, record in enumerate(records, 1):
         kind = record["kind"]
         if timeline:
-            event = {key: record[key] for key in ("kind", "node", "round", "open", "elapsed_seconds", "amounts",
-                                                   "action", "nodes", "by", "edge", "answer", "reason", "problems")
-                     if key in record}
+            history.append(history_record(record, seq))
+            event = {"seq": seq, "schema_version": history[-1]["schema_version"]}
+            event.update({key: record[key] for key in ("kind", "node", "round", "open", "elapsed_seconds", "amounts",
+                                                       "action", "nodes", "by", "edge", "answer", "reason", "problems")
+                          if key in record})
             if kind in ("challenged", "verdict"):
                 event["id"] = record["id"]
             if record.get("fixed_out"):
@@ -128,7 +193,7 @@ def explain_records(graph: dict, records: Iterable[dict], status: str, questions
         topology = "last known graph; external graph revision cannot be reconstructed"
     return {"status": status, "topology": topology,
             "evidence": "recorded deliveries, not live mailbox contents", "nodes": nodes, "outputs": outputs,
-            "managers": managers, **({"timeline": events} if timeline else {})}
+            "managers": managers, **({"timeline": events, "provenance": _provenance(history)} if timeline else {})}
 
 
 def diagram(view: dict, format: str) -> str:

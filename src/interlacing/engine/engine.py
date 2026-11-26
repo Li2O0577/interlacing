@@ -508,7 +508,7 @@ class Engine:
                 return False
             self._snap(node, act)
             try:
-                self._recorder.act(act, open=True)
+                self._recorder.act(act, open=True, children=state.inner.values())
             except Exception as exc:   # noqa: BLE001 - something it sent or holds is not plain data
                 raise NodeError(f"its progress cannot be journaled: {exc}") from None
             ctx._act = Act(node.id, act.round, ())
@@ -1352,7 +1352,7 @@ class Engine:
                     if (state.node.on_correction != "rerun" or state.passive or ctx._saved or reading is None
                             or tuple(reading.at) != act.took or state.streams):
                         reading = None
-                    self._recorder.act(act, reading=reading)
+                    self._recorder.act(act, reading=reading, children=state.inner.values())
                 except Exception as exc:   # noqa: BLE001 - something it sent is not plain data
                     self._fail(state, RunError(f"cannot be journaled: {exc}"))
                     return True
@@ -1448,10 +1448,12 @@ class Engine:
             token = f"{port}#{count}"
             outputs = []
             for name in names:
-                outputs.append([name, len(self._result.outputs[name])])
+                output_index = len(self._result.outputs[name])
+                outputs.append([name, output_index])
                 self._result.outputs[name].append(payload)
                 if act is not None:
                     act.out.append((name, payload))
+                    act.out_indices.append(output_index)
             envelopes = []
             # Only an unchanged immutable body can use another edge's digest.
             share_digest = len(feeds) > 1 and type(payload) is str

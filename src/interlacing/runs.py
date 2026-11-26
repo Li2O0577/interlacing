@@ -339,7 +339,7 @@ class Run:
             changed = engine.control(nodes, action, team=team)
             return {"status": RUNNING, "changed": changed, "switches": self.switches()}
         self._held()
-        from .engine.recorder import SWITCHED
+        from .engine.recorder import Recorder, SWITCHED
         if action not in SWITCHED:
             raise SpecError(f"no action {action!r}: one of {', '.join(SWITCHED)}")
         graph = self._engine().graph
@@ -363,9 +363,9 @@ class Run:
                     before = self.switches()
                     changed = [id for id in ids if action == "restart" or before.get(id, "active") != SWITCHED[action]]
                     if changed:
-                        journal = Journal(path)
-                        journal.write({"kind": "control", "nodes": changed, "action": action})
-                        journal.close()
+                        recorder = Recorder(Journal(path))
+                        recorder.control(changed, action)
+                        recorder.close()
                 return {**self.status(), "changed": changed}
             except SpecError:
                 pass                                # a process took it up meanwhile: leave it for that one
@@ -394,17 +394,18 @@ class Run:
 
     def _absorb(self) -> None:
         """Switches left in ``controls/`` when no process is taking them up go into the journal. Holds the lock."""
+        from .engine.recorder import Recorder
         waiting = self._controls()
         path = self.directory / "journal.jsonl"
         if not waiting or not path.exists():
             return
-        journal = Journal(path)
+        recorder = Recorder(Journal(path))
         for each in waiting:
             request = _read(each)
             if request:
-                journal.write({"kind": "control", "nodes": list(request["nodes"]), "action": request["action"]})
+                recorder.control(list(request["nodes"]), request["action"])
             each.unlink(missing_ok=True)
-        journal.close()
+        recorder.close()
 
     def switches(self) -> dict[str, str]:
         """The nodes whose switch is not on, as the journal has it: node -> paused or stopped."""

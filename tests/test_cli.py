@@ -244,6 +244,39 @@ def test_show_forgets_removed_members_and_their_delivery_evidence():
     assert all('elapsed_seconds' not in e for e in view['timeline'])
 
 
+def test_legacy_provenance_resolves_late_writers_and_reports_missing_or_ambiguous_reads():
+    from interlacing.inspection import explain_records
+    graph = {'nodes': [], 'edges': [], 'inputs': {}, 'outputs': {}}
+    records = [
+        {'kind': 'run', 'id': 'legacy'},
+        {'kind': 'act', 'node': 'receive', 'round': 1, 'took': ['e#1', 'missing#1', 'reused#1']},
+        {'kind': 'act', 'node': 'send', 'round': 1, 'sent': [['e', 1], ['reused', 1]]},
+        {'kind': 'act', 'node': 'send', 'round': 1, 'sent': [['reused', 1]]},
+    ]
+    view = explain_records(graph, iter(records), 'done', [], timeline=True)
+    assert [event['seq'] for event in view['timeline']] == [1, 2, 3, 4]
+    assert all(event['schema_version'] == 0 for event in view['timeline'])
+    assert view['provenance']['run_id'] == 'legacy' and view['provenance']['scope_id'] is None
+    reads = view['provenance']['activations'][0]['reads']
+    assert reads[0]['source'] == {'event_seq': 3, 'replaces': None, 'message': None}
+    assert [read['status'] for read in reads[1:]] == ['not_recorded', 'ambiguous']
+
+
+def test_provenance_uses_emission_slots_when_activations_commit_out_of_order():
+    from interlacing.inspection import explain_records
+    graph = {'nodes': [], 'edges': [], 'inputs': {}, 'outputs': {}}
+    records = [
+        {'kind': 'act', 'node': 'second', 'round': 1, 'out': [['report', ['v', 2]]], 'out_indices': [1],
+         'emits': [['out#2', 'out', [], [['report', 1]]]]},
+        {'kind': 'act', 'node': 'first', 'round': 1, 'out': [['report', ['v', 1]]], 'out_indices': [0],
+         'emits': [['out#1', 'out', [], [['report', 0]]]]},
+    ]
+    view = explain_records(graph, iter(records), 'done', [], timeline=True)
+    first, second = view['provenance']['outputs']['report']
+    assert first == [{'event_seq': 2, 'message': {'token': 'out#1', 'ordinal': 1}, 'replaces_event_seq': None}]
+    assert second == [{'event_seq': 1, 'message': {'token': 'out#2', 'ordinal': 1}, 'replaces_event_seq': None}]
+
+
 @pytest.mark.parametrize("cut_after_correction", [False, True])
 def test_resumed_cooling_review_replaces_the_existing_report(tmp_path, monkeypatch, cut_after_correction):
     data = Path(__file__).resolve().parents[1] / 'examples' / 'data'
@@ -252,6 +285,7 @@ def test_resumed_cooling_review_replaces_the_existing_report(tmp_path, monkeypat
     waiting = run.start({'steps': 100})
     assert waiting['status'] == 'waiting' and waiting['questions'][0]['request'] == 36.6032
     assert run.show()['nodes']['b2']['activation_recorded']
+    before = run.show(timeline=True)['provenance']
     run.answer({'units': 'percent', 'reading': waiting['questions'][0]['request']})
     if cut_after_correction:
         # Kill a separate process exactly after A durably corrected the input, before B2 runs again.
@@ -272,6 +306,21 @@ Run(sys.argv[1]).resume()
     done = Run(run.directory).resume()
     assert done['status'] == 'done' and done['outputs'] == {'report': [0.366]}
     assert done['used'] == {'simulations': 1} and done['rounds'] == {'a': 2, 'b1': 1, 'b2': 2}
-    timeline = run.show(timeline=True)['timeline']
+    view = run.show(timeline=True)
+    timeline = view['timeline']
     assert [event['revised_outputs'] for event in timeline if 'revised_outputs' in event] == [
         [{'output': 'report', 'index': 0}]]
+    assert all(event['schema_version'] == 1 for event in timeline)
+    provenance = view['provenance']
+    assert provenance['run_id'] == before['run_id'] and provenance['scope_id'] == before['scope_id']
+    original, replacement = provenance['outputs']['report'][0]
+    assert original == before['outputs']['report'][0][0]
+    assert replacement['replaces_event_seq'] == original['event_seq']
+    assert original['message']['token'] == replacement['message']['token'] == 'report#1'
+    by_event = {entry['event_seq']: entry for entry in provenance['activations']}
+    original_read = by_event[original['event_seq']]['reads'][0]
+    replacement_read = by_event[replacement['event_seq']]['reads'][0]
+    assert by_event[replacement['event_seq']]['round'] == 2
+    assert replacement_read['delivery'] == 'a.reading>b2.reading#2'
+    assert replacement_read['source']['replaces'] == original_read['delivery']
+    assert by_event[replacement_read['source']['event_seq']]['node'] == 'a'

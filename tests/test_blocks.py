@@ -121,6 +121,25 @@ def test_after_a_restart_a_block_goes_on_inside_instead_of_starting_over(tmp_pat
     assert Engine(build(), DEFAULT, journal=Journal(tmp_path / 'j.jsonl')).resume().last('out') == 302
 
 
+def test_finished_blocks_keep_separate_history_after_their_journals_are_removed(tmp_path):
+    from interlacing.inspection import explain
+    inner = seq(fn(add_one), fn(double), name='shared')
+    graph = Fan(inner('left'), inner('right')).build(DEFAULT)
+    path = tmp_path / 'run.jsonl'
+    assert Engine(graph, DEFAULT, workers=2, journal=Journal(path)).run({'in': 3}).complete
+    assert not (tmp_path / 'run.jsonl.d').exists()
+
+    provenance = explain(dump(graph), path, 'done', [], timeline=True)['provenance']
+    left, right = provenance['children']
+    assert left['scope_id'] and right['scope_id'] and left['scope_id'] != right['scope_id']
+    assert {left['parent_event_seq'], right['parent_event_seq']} == {
+        item['event_seq'] for item in provenance['activations'] if item['node'] in ('left', 'right')}
+    for child in (left, right):
+        first, second = child['activations']
+        assert (first['node'], second['node']) == ('s1', 's2')
+        assert second['reads'][0]['source']['event_seq'] == first['event_seq']
+
+
 def test_a_time_limit_applies_to_each_node_inside_a_block_and_problems_inside_are_seen_outside(tmp_path):
     import time
     slow = fn(lambda x: time.sleep(0.2) or x)        # each well inside the limit, all three together over it

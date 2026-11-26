@@ -6,11 +6,13 @@ to put the run back as it was: counters, the nodes' own state and the envelopes 
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Iterable
+import secrets
 import time
 from typing import Any, Callable, Mapping
 
 from ..base import Envelope, Protocol
-from .journal import JournalBackend, pack, pack_body, unpack_body
+from .journal import JournalBackend, history_record, pack, pack_body, unpack_body
 from .ledger import Ledger
 from .result import Result
 from .scheduler import Scheduler
@@ -20,7 +22,7 @@ from .wiring import ACTIVE, PAUSED, STOPPED, Reading, Sent, Wiring, bounded
 class Act:
     """What one activation did, for the journal."""
 
-    __slots__ = ("node", "round", "took", "sent", "out", "limited", "calls", "snaps", "problems", "changes", "emits",
+    __slots__ = ("node", "round", "took", "sent", "out", "out_indices", "limited", "calls", "snaps", "problems", "changes", "emits",
                  "fixed_box", "fixed_out", "redos", "rejects", "started")
 
     def __init__(self, node: str, round: int, took: tuple) -> None:
@@ -28,6 +30,7 @@ class Act:
         self.node, self.round, self.took = node, round, took
         self.sent: list[Envelope] = []
         self.out: list[tuple] = []
+        self.out_indices: list[int] = []  # output slots assigned at emission, even if records finish out of order
         self.limited: list[str] = []
         self.calls: list[str] = []
         self.snaps: dict[str, Any] = {}
@@ -51,45 +54,58 @@ class Recorder:
     def read(self) -> list[dict]:
         return self.journal.read()
 
-    def run(self, id: str, graph: str, sent: list[Envelope]) -> None:
-        self.journal.write({"kind": "run", "id": id, "graph": graph, "sent": [pack(e) for e in sent]})
+    def _write(self, record: dict) -> None:
+        self.journal.write({"schema_version": 1, **record})
 
-    def act(self, act: Act, open: bool = False, reading: Reading | None = None) -> None:
+    def run(self, id: str, graph: str, sent: list[Envelope]) -> None:
+        self._write({"kind": "run", "id": id, "scope_id": secrets.token_hex(16), "graph": graph,
+                     "sent": [pack(e) for e in sent]})
+
+    def act(self, act: Act, open: bool = False, reading: Reading | None = None,
+            children: Iterable[JournalBackend] = ()) -> None:
         """What an activation did. ``open``: it saved its progress and goes on (``ctx.commit``)."""
-        self.journal.write({"kind": "act", "node": act.node, "round": act.round, "took": list(act.took),
-                            "elapsed_seconds": time.monotonic() - act.started,
-                            **({"rerun_outputs": reading.emits} if reading is not None else {}),
-                            "sent": [pack(e) for e in act.sent],
-                            "out": [[name, pack_body(payload)] for name, payload in act.out],
-                            "limited": act.limited, "calls": act.calls, "snaps": act.snaps,
-                            **({"problems": act.problems} if act.problems else {}),
-                            **({"changes": act.changes} if act.changes else {}),
-                            **({"emits": act.emits} if act.emits else {}),
-                            **({"redos": act.redos} if act.redos else {}),
-                            **({"fixed": act.fixed_box} if act.fixed_box else {}),
-                            **({"rejects": act.rejects} if act.rejects else {}),
-                            **({"fixed_out": [[name, index, pack_body(payload)] for name, index, payload in act.fixed_out]}
-                               if act.fixed_out else {}),
-                            **({"open": True} if open else {})})
+        child_history = []
+        for child in children:
+            events = [history_record(record, seq) for seq, record in enumerate(child.read(), 1)
+                      if record["kind"] in ("run", "act")]
+            if events:
+                child_history.append(events)
+        self._write({"kind": "act", "node": act.node, "round": act.round, "took": list(act.took),
+                     "elapsed_seconds": time.monotonic() - act.started,
+                     **({"rerun_outputs": reading.emits} if reading is not None else {}),
+                     "sent": [pack(e) for e in act.sent],
+                     "out": [[name, pack_body(payload)] for name, payload in act.out],
+                     **({"out_indices": act.out_indices} if act.out_indices else {}),
+                     "limited": act.limited, "calls": act.calls, "snaps": act.snaps,
+                     **({"problems": act.problems} if act.problems else {}),
+                     **({"changes": act.changes} if act.changes else {}),
+                     **({"emits": act.emits} if act.emits else {}),
+                     **({"redos": act.redos} if act.redos else {}),
+                     **({"fixed": act.fixed_box} if act.fixed_box else {}),
+                     **({"rejects": act.rejects} if act.rejects else {}),
+                     **({"fixed_out": [[name, index, pack_body(payload)] for name, index, payload in act.fixed_out]}
+                        if act.fixed_out else {}),
+                     **({"child_history": child_history} if child_history else {}),
+                     **({"open": True} if open else {})})
 
     def use(self, node: str, round: int, amounts: Mapping[str, float]) -> None:
-        self.journal.write({"kind": "use", "node": node, "round": round, "amounts": dict(amounts)})
+        self._write({"kind": "use", "node": node, "round": round, "amounts": dict(amounts)})
 
     def once(self, node: str, round: int, name: str, value: Any) -> None:
-        self.journal.write({"kind": "once", "node": node, "round": round, "name": name, "value": value})
+        self._write({"kind": "once", "node": node, "round": round, "name": name, "value": value})
 
-    def control(self, nodes: list[str], action: str, by: str | None) -> None:
-        self.journal.write({"kind": "control", "nodes": nodes, "action": action, **({"by": by} if by else {})})
+    def control(self, nodes: list[str], action: str, by: str | None = None) -> None:
+        self._write({"kind": "control", "nodes": nodes, "action": action, **({"by": by} if by else {})})
 
     def review(self, kind, rejection) -> None:
-        self.journal.write({"kind": kind, "id": rejection.id, "node": rejection.by, "edge": rejection.feed.id,
-                            **({"answer": rejection.answer} if rejection.answer else {"reason": rejection.reason})})
+        self._write({"kind": kind, "id": rejection.id, "node": rejection.by, "edge": rejection.feed.id,
+                     **({"answer": rejection.answer} if rejection.answer else {"reason": rejection.reason})})
 
     def change(self, under: str, graph: str, dropped: int) -> None:
-        self.journal.write({"kind": "change", "from": under, "graph": graph, "dropped": dropped})
+        self._write({"kind": "change", "from": under, "graph": graph, "dropped": dropped})
 
     def end(self) -> None:
-        self.journal.write({"kind": "end"})
+        self._write({"kind": "end"})
         self.journal.prune_empty_inner()
 
     def close(self) -> None:

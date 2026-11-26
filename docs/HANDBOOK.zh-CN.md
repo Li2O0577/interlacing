@@ -181,6 +181,8 @@ interlacing resume --dir demo-run
 
 加 `--timeline` 按日志顺序看激活轮次、质疑与答复、节点开关和上报用量。新日志的 `elapsed_seconds` 是本次激活记录片段的墙钟耗时（包括等待）；旧记录没有耗时字段。失败运行另有 `failure`。用 `--format mermaid` 或 `--format dot` 导出节点与端口连线。若外部替换图只留下摘要，输出会标明最后已知拓扑。[模拟结果的两种审查路径](../examples/graphs/simulation_review.py)
 
+`--timeline` 同时返回 `provenance`。可从输出的初始版本和替换版本找到对应记录，再通过 `scope_id` 和 `event_seq` 定位执行、查看它读过的投递及生产记录。子图完成后即使清理恢复日志，`children` 也保留这些元数据。旧日志可继续查看，缺失或无法唯一匹配的投递来源会明确标记。
+
 `run/resume` 的退出码：`0` 完成，`1` 失败或被拒绝，`3` 等人，`4` 已停止。`status` 查运行状态和问题，`files` 查文件归属，`control pause|resume|stop|restart` 操作单个节点或管理树。目录内有 `graph.json`、`options.json`、`inputs.json`、`journal.jsonl`、`state.json` 和问题、答复、文件。继续整次运行用 `resume --dir`；让某个暂停节点恢复用 `control resume NODE --dir`。
 
 **MCP 入口。** 让客户端以 stdio 启动 `interlacing serve --runs /path/to/runs`，按需添加上述能力参数。常用调用顺序是 `guide → check → start → status`；遇到人工问题用 `answer → resume`。另有 `runs`、`stop`、`control`。长任务可在 `start/resume` 传 `wait: false` 后查询状态。要单独提供一个远程节点，使用 `node-serve`。[MCP 工具参数](GRAPH.md#mcp-服务)
