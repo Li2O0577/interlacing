@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from ..base import Envelope, Ref
 from .stream import Stream
@@ -24,6 +25,38 @@ from .stream import Stream
 
 class JournalError(ValueError):
     pass
+
+
+class JournalBackend(Protocol):
+    """Storage for one run, with a separate journal per nested activation."""
+
+    def read(self) -> list[dict]:
+        """Read the recoverable records in order."""
+        ...
+
+    def write(self, record: dict) -> None:
+        """Append one record."""
+        ...
+
+    def close(self) -> None:
+        """Release this handle without removing its records."""
+        ...
+
+    def reset(self) -> None:
+        """Clear this run's records so it can start afresh."""
+        ...
+
+    def inner(self, node: str, round: int) -> JournalBackend:
+        """Open the same child journal for a given node and activation round."""
+        ...
+
+    def discard(self) -> None:
+        """Remove this journal and the journals of all its descendants."""
+        ...
+
+    def prune_empty_inner(self) -> None:
+        """Release unused child storage when this run ends."""
+        ...
 
 
 class Journal:
@@ -70,6 +103,28 @@ class Journal:
         if self._file is not None:
             self._file.close()
             self._file = None
+
+    def reset(self) -> None:
+        self.close()
+        self.path.unlink()
+
+    @property
+    def _inner_dir(self) -> Path:
+        return self.path.with_name(self.path.name + ".d")
+
+    def inner(self, node: str, round: int) -> Journal:
+        return Journal(self._inner_dir / f"{node}-{round}.jsonl", sync=self.sync)
+
+    def discard(self) -> None:
+        self.close()
+        shutil.rmtree(self._inner_dir, ignore_errors=True)
+        self.path.unlink(missing_ok=True)
+
+    def prune_empty_inner(self) -> None:
+        try:
+            self._inner_dir.rmdir()
+        except OSError:
+            pass  # never created, or still holds journals
 
 
 def pack_body(body: Any) -> list:

@@ -6,14 +6,11 @@ to put the run back as it was: counters, the nodes' own state and the envelopes 
 from __future__ import annotations
 
 from collections import OrderedDict
-import os
-import shutil
 import time
-from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from ..base import Envelope, Protocol
-from .journal import Journal, pack, pack_body, unpack_body
+from .journal import JournalBackend, pack, pack_body, unpack_body
 from .ledger import Ledger
 from .result import Result
 from .scheduler import Scheduler
@@ -43,21 +40,12 @@ class Act:
         self.rejects: list[str] = []      # the edges on which it rejected what came
 
 
-def discard(journal: Path) -> None:
-    """Remove the journal of a run that happened inside an activation, and those of the runs inside that."""
-    shutil.rmtree(journal.with_name(journal.name + ".d"), ignore_errors=True)
-    try:
-        journal.unlink()
-    except OSError:
-        pass
-
-
 class Recorder:
     """Writes one run's records to its journal."""
 
     __slots__ = ("journal",)
 
-    def __init__(self, journal: Journal):
+    def __init__(self, journal: JournalBackend):
         self.journal = journal
 
     def read(self) -> list[dict]:
@@ -102,22 +90,14 @@ class Recorder:
 
     def end(self) -> None:
         self.journal.write({"kind": "end"})
-        try:
-            os.rmdir(self.inner_dir)
-        except OSError:
-            pass                # never made, or something is still in it
+        self.journal.prune_empty_inner()
 
     def close(self) -> None:
         self.journal.close()
 
-    @property
-    def inner_dir(self) -> Path:
-        path = self.journal.path
-        return path.with_name(path.name + ".d")
-
-    def inner(self, node: str, round: int) -> Journal:
+    def inner(self, node: str, round: int) -> JournalBackend:
         """The journal of a run made inside activation ``round`` of ``node``."""
-        return Journal(self.inner_dir / f"{node}-{round}.jsonl", sync=self.journal.sync)
+        return self.journal.inner(node, round)
 
 
 SWITCHED = {"pause": PAUSED, "stop": STOPPED, "resume": ACTIVE, "restart": ACTIVE}

@@ -109,9 +109,9 @@ from .aio import Signal, Threads, athrough, through, to_end
 from .checks import Checks
 from .clock import overrun, set_limits
 from .context import RunContext
-from .journal import Journal
+from .journal import JournalBackend
 from .ledger import Ledger, amounts
-from .recorder import Act, Recorder, discard, restore, under
+from .recorder import Act, Recorder, restore, under
 from .result import OverBudget, Result, RunError
 from .scheduler import Scheduler
 from .stream import Stream
@@ -129,7 +129,7 @@ class Engine:
 
     def __init__(self, graph: Graph, protocols: Protocols | None = None, *, workers: int = 0,
                  stopping: Callable[[], bool] | None = None, transport: Transport | None = None,
-                 journal: Journal | None = None, time_limit: float | None = None,
+                 journal: JournalBackend | None = None, time_limit: float | None = None,
                  observe: Callable[[Mapping], None] | None = None, budget: Mapping[str, float] | None = None,
                  firm: bool = False, rebuild: Callable[[dict], Node] | None = None, max_nodes: int | None = None):
         if workers < 0:
@@ -289,8 +289,7 @@ class Engine:
             if records:
                 if not fresh and under(records) == self.graph.digest:
                     return True
-                recorder.close()
-                recorder.journal.path.unlink()
+                recorder.journal.reset()
         return False
 
     def _restore(self, change: bool) -> bool:
@@ -1357,8 +1356,8 @@ class Engine:
                 except Exception as exc:   # noqa: BLE001 - something it sent is not plain data
                     self._fail(state, RunError(f"cannot be journaled: {exc}"))
                     return True
-                for path in state.inner:       # the activation is on record: what ran inside it is not needed again
-                    discard(path)
+                for journal in state.inner.values():
+                    journal.discard()         # the activation is on record: its child journals are no longer needed
             state.running = False
             self._active -= 1
             if state.halt == "restart":    # it finished before it looked: what it did stands, what it holds goes
@@ -1727,8 +1726,7 @@ class Engine:
         if self._recorder is not None:
             journal = self._recorder.inner(state.node.id, ctx.round)
             with self._lock:
-                if journal.path not in state.inner:
-                    state.inner.append(journal.path)
+                state.inner[ctx.round] = journal
         told, id = self._observe, state.node.id
         observe = None if told is None else lambda event: told({**event, "within": [id, *event.get("within", ())]})
         inner = Engine(graph, protocols, workers=workers, stopping=ctx.stopping, journal=journal,

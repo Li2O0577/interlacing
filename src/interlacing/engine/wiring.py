@@ -11,6 +11,7 @@ from collections import OrderedDict, deque
 from typing import Any
 
 from ..base import Delivery, Edge, Firing, Graph, Node, Protocols
+from .journal import JournalBackend
 from .result import RunError
 
 INPUT = "input:"   # prefix of the pseudo edge id of a graph input
@@ -185,7 +186,7 @@ class State:
         self.time_limit: float | None = None      # how long an activation may take, in seconds
         self.rejected: dict[str, int] = {}        # this activation: output port -> times a payload was given back
         self.delivered = False                    # this activation has sent something on
-        self.inner: list = []                     # this activation: the journals of the runs it made inside itself
+        self.inner: dict[int, JournalBackend] = {}  # round -> child journal to discard after completion
         self.status = ACTIVE                      # its switch: active, paused or stopped
         self.halt: str | bool = False             # this activation is to end at its next step: "stop" or "restart"
         self.holding: list = []                   # this activation: (feed, envelope) it took, to give back if it is cut
@@ -228,7 +229,7 @@ class State:
         if self.late:
             self.late.clear()
         if self.inner:
-            self.inner = []
+            self.inner.clear()
 
 
 class Wiring:

@@ -10,7 +10,7 @@ import pytest
 from interlacing.base import GraphBuilder, GraphError, Node, Port
 from interlacing.engine import Engine, Journal, JournalError, RunError
 from interlacing.methods import Chain, Loop
-from interlacing.nodes import FunctionNode
+from interlacing.nodes import FunctionNode, GraphNode
 from interlacing.protocols import DEFAULT, standard
 
 
@@ -79,6 +79,61 @@ def test_what_was_finished_is_not_done_again_and_what_was_cut_off_is(tmp_path):
     assert result.outputs == {'out': [5]} and result.complete
     assert (first.calls, second.calls, third.calls) == (1, 2, 2)
     assert result.rounds == {'a': 1, 'b': 1, 'c': 1} and result.activations == 3 and result.envelopes == 3
+
+
+def test_a_backend_without_paths_can_resume_and_discard_a_child_journal():
+    class MemoryJournal:
+        def __init__(self):
+            self.records = []
+            self.children = {}
+
+        def read(self):
+            return self.records.copy()
+
+        def write(self, record):
+            self.records.append(record)
+
+        def close(self):
+            pass
+
+        def reset(self):
+            self.records.clear()
+
+        def inner(self, node, round):
+            key = (node, round)
+            if key not in self.children:
+                self.children[key] = MemoryJournal()
+            return self.children[key]
+
+        def discard(self):
+            self.reset()
+            self.children.clear()
+
+        def prune_empty_inner(self):
+            self.children = {key: child for key, child in self.children.items() if child.records or child.children}
+
+    first, second = Flaky(add_one), Flaky(double)
+    first.broken = False
+
+    def build():
+        inner = Chain(fn('first', first), fn('second', second)).build(DEFAULT)
+        return Chain(GraphNode('block', inner)).build(DEFAULT)
+
+    journal = MemoryJournal()
+    with pytest.raises(RunError, match='node second failed'):
+        Engine(build(), DEFAULT, journal=journal).run({'in': 3})
+    child = journal.children[('block', 1)]
+    assert [record['kind'] for record in child.records] == ['run', 'act']
+
+    second.broken = False
+    result = Engine(build(), DEFAULT, journal=journal).resume()
+    assert result.outputs == {'out': [8]}
+    assert (first.calls, second.calls) == (1, 2)
+    assert journal.children == {}
+
+    result = Engine(build(), DEFAULT, journal=journal).go({'in': 5}, fresh=True)
+    assert result.outputs == {'out': [12]}
+    assert journal.children == {}
 
 
 def test_a_run_survives_the_process_being_killed(tmp_path):
