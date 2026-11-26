@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -156,7 +157,20 @@ def _holder(directory: Path) -> dict | None:
 
 def _alive(pid) -> bool:
     """Whether a process of this machine is still there. Where that cannot be asked safely, it is taken to be."""
-    if os.name != "posix" or type(pid) is not int or pid <= 0:
+    if type(pid) is not int or pid <= 0 or pid > 0xffffffff:
+        return True
+    if sys.platform == "win32":
+        # A zero-time wait only observes termination. Windows os.kill does not offer the POSIX probe.
+        import _winapi
+        try:
+            handle = _winapi.OpenProcess(_winapi.SYNCHRONIZE, False, pid)
+        except OSError as exc:
+            return exc.winerror != 87  # ERROR_INVALID_PARAMETER: no process has that PID
+        try:
+            return _winapi.WaitForSingleObject(handle, 0) != _winapi.WAIT_OBJECT_0
+        finally:
+            _winapi.CloseHandle(handle)
+    if os.name != "posix":
         return True
     try:
         os.kill(pid, 0)

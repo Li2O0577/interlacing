@@ -99,6 +99,19 @@ class Reading:
         self.queued = False               # it is waiting to run again
         self.took: dict[str, list] = {}   # port -> [(feed, envelope), ...] it took, so that a rerun may reject them
 
+    def update(self, feed, old, envelope, value):
+        port, index = self.at[old]
+        items = self.took[port]
+        for i, (_, was) in enumerate(items):
+            if was.id == old:
+                items[i] = (feed, envelope)
+                break
+        if index is None:
+            self.inputs[port] = value
+        else:
+            self.inputs[port][index] = value
+        self.at = {envelope.id if name == old else name: where for name, where in self.at.items()}
+
 
 def bounded(log: OrderedDict, key, value) -> None:
     log[key] = value

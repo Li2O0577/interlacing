@@ -150,7 +150,7 @@ assert run(agent, {"task": "Check availability"}).last("out") == "ready"
 |---|---|---|
 | A 发出前就发现产物格式不合规 | 输出端口 | `Port("score", check=validate, repairs=1)` 按配置尝试修复、警告或失败 |
 | B1 结合其他证据怀疑 A 的模拟结果 | B1 主动提问，A 答复 | 边用 `connect(..., challenges=N)` 允许质疑。B1 调 `ctx.reject(port, reason)` 等答复；多来源时可用 `which` 指定发送者。A 解释或更正，普通节点也能实现 `challenged(ctx, rejection)` |
-| A 已经知道哪份消息错了 | A 更正，接收者按策略处理 | `sent = ctx.emit(...)` 后可用 `ctx.correct(sent, value)`。未读的值可替换，已读的按 `rerun/tell/ignore`；恢复后才更正恢复前已读的消息，按 `tell` 通知 |
+| A 已经知道哪份消息错了 | A 更正，接收者按策略处理 | `sent = ctx.emit(...)` 后可用 `ctx.correct(sent, value)`。未读的值可替换，已读的按 `rerun/tell/ignore`；恢复后，普通值输入可按 `rerun` 原位修订，旧日志等缺少可恢复历史时按 `tell` 通知 |
 | A 想暂停受影响的 B2 | 图作者声明管理关系，运行时执行 | `builder.manage("a", "b2")` 声明权限，A 才能用 `ctx.control("b2", "pause")` 直接暂停它。操作员可通过 `engine.control` 或 CLI 控制节点 |
 
 **实际走一遍普通节点的驳回。** 在仓库根目录执行下面命令。两个估算器分别给出 50 和 76，合并节点点名驳回偏差大的估算。上游把估算改成 74，同时改正一起发出的说明。最终面积是 75，日志节点拿到修订后的文字。这个例子覆盖“质疑哪份结果、谁回答、哪些相关输出一起改”；对受影响节点逐层评估和请求暂停，需要图作者编排。
@@ -184,6 +184,8 @@ interlacing resume --dir demo-run
 `run/resume` 的退出码：`0` 完成，`1` 失败或被拒绝，`3` 等人，`4` 已停止。`status` 查运行状态和问题，`files` 查文件归属，`control pause|resume|stop|restart` 操作单个节点或管理树。目录内有 `graph.json`、`options.json`、`inputs.json`、`journal.jsonl`、`state.json` 和问题、答复、文件。继续整次运行用 `resume --dir`；让某个暂停节点恢复用 `control resume NODE --dir`。
 
 **MCP 入口。** 让客户端以 stdio 启动 `interlacing serve --runs /path/to/runs`，按需添加上述能力参数。常用调用顺序是 `guide → check → start → status`；遇到人工问题用 `answer → resume`。另有 `runs`、`stop`、`control`。长任务可在 `start/resume` 传 `wait: false` 后查询状态。要单独提供一个远程节点，使用 `node-serve`。[MCP 工具参数](GRAPH.md#mcp-服务)
+
+**试用 MCP 审查模拟。** 在 `examples/data` 中启动服务，让客户端以 stdio 运行 `python -m interlacing.cli serve --runs /绝对路径/runs --allow steps`。将 [cooling_review.json](../examples/data/cooling_review.json) 的内容作为 `start.graph`，输入 `{"steps":100}`。B1 会收到 B2 的初稿 36.6032。用同一运行编号调用 `show`（`timeline: true`），可看到 B2 已经运行、B1 正在等人。在这个示例里，初稿误把百分数当作比例。用 `answer` 提交 `{"units":"percent","reading":36.6032}`，再调 `resume`。完成后的 `outputs.report` 只含 0.366，`used.simulations` 为 1。
 
 <a id="maintain"></a>
 

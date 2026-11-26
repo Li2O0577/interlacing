@@ -244,3 +244,36 @@ def test_show_forgets_removed_members_and_their_delivery_evidence(tmp_path):
     assert view['managers'] == {'c': 'a'}
     assert view['nodes']['c']['awaiting_first_delivery_from'] == ['a.y']
     assert all('elapsed_seconds' not in e for e in view['timeline'])
+
+
+@pytest.mark.parametrize("cut_after_correction", [False, True])
+def test_resumed_cooling_review_replaces_the_existing_report(tmp_path, monkeypatch, cut_after_correction):
+    data = Path(__file__).resolve().parents[1] / 'examples' / 'data'
+    monkeypatch.syspath_prepend(str(data))
+    run = Run.create(tmp_path / 'simulation', json.loads((data / 'cooling_review.json').read_text()), allow=['steps'])
+    waiting = run.start({'steps': 100})
+    assert waiting['status'] == 'waiting' and waiting['questions'][0]['request'] == 36.6032
+    assert run.show()['nodes']['b2']['activation_recorded']
+    run.answer({'units': 'percent', 'reading': waiting['questions'][0]['request']})
+    if cut_after_correction:
+        # Kill a separate process exactly after A durably corrected the input, before B2 runs again.
+        script = """
+import os, sys
+from interlacing import Journal
+from interlacing.runs import Run
+write = Journal.write
+def cut(self, record):
+    write(self, record)
+    if record.get('redos'):
+        os._exit(37)
+Journal.write = cut
+Run(sys.argv[1]).resume()
+"""
+        process = subprocess.run([sys.executable, '-c', script, str(run.directory)], cwd=data, timeout=20)
+        assert process.returncode == 37
+    done = Run(run.directory).resume()
+    assert done['status'] == 'done' and done['outputs'] == {'report': [0.366]}
+    assert done['used'] == {'simulations': 1} and done['rounds'] == {'a': 2, 'b1': 1, 'b2': 2}
+    timeline = run.show(timeline=True)['timeline']
+    assert [event['revised_outputs'] for event in timeline if 'revised_outputs' in event] == [
+        [{'output': 'report', 'index': 0}]]

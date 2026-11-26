@@ -62,6 +62,9 @@ TOOLS = [
          "wait": _WAIT}, "required": ["graph"]}},
     {"name": "status", "description": "Where a run stands, and the questions in it that are waiting for an answer.",
      "inputSchema": {"type": "object", "properties": {"run": _RUN}, "required": ["run"]}},
+    {"name": "show", "description": "Inspect recorded deliveries and dependencies. Include the timeline for pauses "
+     "and review verdicts. Use status for final output values.",
+     "inputSchema": {"type": "object", "properties": {"run": _RUN, "timeline": {"type": "boolean"}}, "required": ["run"]}},
     {"name": "resume", "description": "Carry on a run that was waiting, stopped or failed. Nothing that had finished runs again.",
      "inputSchema": {"type": "object", "properties": {"run": _RUN, "wait": _WAIT}, "required": ["run"]}},
     {"name": "stop", "description": "Ask a run that is going to stop. Nothing new starts in it; it ends as stopped and "
@@ -180,6 +183,12 @@ class Server:
             state = {"status": "running", "graph": state.get("graph"), "updated": state.get("updated"),
                      "questions": state["questions"]}
         return {"run": arguments["run"], **state}
+
+    def show(self, arguments: Mapping) -> dict:
+        timeline = arguments.get("timeline", False)
+        if not isinstance(timeline, bool):
+            raise SpecError("timeline must be a boolean")
+        return {"run": arguments["run"], **self._run(arguments).show(timeline=timeline)}
 
     def resume(self, arguments: Mapping) -> dict:
         run = self._run(arguments)
