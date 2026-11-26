@@ -243,6 +243,8 @@ Each layer uses only the layers below it. The engine knows no particular node, p
 
 The full description is [docs/GRAPH.en.md](https://github.com/Li2O0577/interlacing/blob/main/docs/GRAPH.en.md) (also [in Chinese](https://github.com/Li2O0577/interlacing/blob/main/docs/GRAPH.md)). Nineteen examples that run as they stand are in [examples/graphs/](https://github.com/Li2O0577/interlacing/tree/main/examples/graphs), and graphs written as JSON in [examples/data/](https://github.com/Li2O0577/interlacing/tree/main/examples/data).
 
+On the PostgreSQL feature branch, see the [collaboration service guide](docs/POSTGRES.md) for task assignment, claims and recovery. The [capability review against LangGraph (Chinese)](docs/LANGGRAPH_COMPARISON.md) records the tested scheduling difference and the limits of the service API.
+
 ## Tests
 
 ```sh

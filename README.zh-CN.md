@@ -238,6 +238,8 @@ interlacing resume --dir /tmp/run                                               
 
 完整说明见 [docs/GRAPH.md](docs/GRAPH.md)（英文版 [docs/GRAPH.en.md](docs/GRAPH.en.md)）。十九个可以直接运行的例子在 [examples/graphs/](examples/graphs/)，写成 JSON 的图在 [examples/data/](examples/data/)。
 
+本分支支持 PostgreSQL 多人审核。[协作服务说明](docs/POSTGRES.md)给出了认领、提交和接手续跑的操作示例。[与 LangGraph 的任务对照和检测记录](docs/LANGGRAPH_COMPARISON.md)列出了本地与服务端能运行哪些图，以及哪些能力已有对照实验。
+
 ## 测试
 
 ```sh
