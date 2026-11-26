@@ -6,7 +6,7 @@ and continued by a third::
     graph.json      the graph, as data
     options.json    what the graph may reach (modules, processes), how many workers, the time limit, the budget
     inputs.json     what the run was started with
-    journal.jsonl   what has happened so far
+    journal.jsonl or journal.sqlite3  what has happened so far
     questions/      one file per question that a person in the graph has been asked
     answers/        one file per answer given
     files/          the workspace of the graph's nodes: what the ``file`` protocol's paths are relative to, with
@@ -34,12 +34,13 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .engine import Engine, Journal, RunError
+from .engine import Engine, Journal, RunError, SQLiteJournal
 from .nodes import Workspace
 from .models import ChatResult, FakeProvider, ProviderError, build
 from .spec import Catalog, SpecError, dump, load, load_node
 
 DONE, WAITING, STOPPED, FAILED, NEW, RUNNING = "done", "waiting", "stopped", "failed", "new", "running"
+JOURNALS = ("jsonl", "sqlite")
 
 
 class Pending(BaseException):
@@ -211,7 +212,7 @@ class Run:
                models: Callable[[str], Any] | None = models_from_environment, files=None,
                time_limit: float | None = None, observe: Callable[[Mapping], None] | None = None,
                workspace=None, budget: Mapping[str, float] | None = None, strict: bool = False, tools=None,
-               apps=None, remotes=()) -> "Run":
+               apps=None, remotes=(), journal: str = "jsonl") -> "Run":
         """Check the description and set up a directory for one run of it. Nothing runs yet. ``files`` is
         the directory the description may take text from; the text is kept in the run, the files are not
         needed again. ``time_limit`` is the longest one activation may take, in seconds. ``workspace`` is the
@@ -221,22 +222,29 @@ class Run:
         in it may give itself more time than ``time_limit``, and no block more threads than ``workers``.
         ``tools`` is a tool pool: the directory the graph's agents may take tool files from. ``apps`` is the
         directory whose folders may be nodes, and ``remotes`` the addresses
-        of served nodes the graph may reach."""
+        of served nodes the graph may reach. ``journal`` selects JSONL or SQLite for this run's history."""
         run = cls(directory, models=models, observe=observe)
-        if (run.directory / "graph.json").exists():
-            raise SpecError(f"{run.directory} already holds a run")
         if time_limit is not None and not time_limit > 0:
             raise SpecError("the time limit must be a positive number of seconds")
+        if journal not in JOURNALS:
+            raise SpecError(f"unknown journal backend {journal!r}: choose jsonl or sqlite")
         options = {"allow": list(allow), "processes": bool(processes), "workers": int(workers), "time_limit": time_limit,
                    "budget": _budget(budget), "strict": bool(strict),
                    "workspace": str(Path(workspace).resolve()) if workspace is not None else None,
                    "tools": str(Path(tools).resolve()) if tools is not None else None,
                    "apps": str(Path(apps).resolve()) if apps is not None else None, "remotes": list(remotes)}
-        run.workspace(options).mkdir(parents=True, exist_ok=True)
-        graph = load(description, run._catalog(options, files))
-        _write(run.directory / "graph.json", dump(graph))
-        _write(run.directory / "options.json", options)
-        run._state(NEW, graph=graph.digest)
+        if journal != "jsonl":
+            options["journal"] = journal
+        run.directory.mkdir(parents=True, exist_ok=True)
+        with _Lock(run.directory):
+            if (run.directory / "graph.json").exists():
+                raise SpecError(f"{run.directory} already holds a run")
+            run.workspace(options).mkdir(parents=True, exist_ok=True)
+            graph = load(description, run._catalog(options, files))
+            saved_graph = dump(graph)
+            _write(run.directory / "options.json", options)
+            run._state(NEW, graph=graph.digest)
+            _write(run.directory / "graph.json", saved_graph)
         return run
 
     def workspace(self, options: Mapping | None = None) -> Path:
@@ -256,6 +264,15 @@ class Run:
                        tools=options.get("tools"), apps=options.get("apps"),
                        remotes=options.get("remotes", ()))
 
+    def _journal(self, options: Mapping | None = None) -> Journal | SQLiteJournal:
+        options = options if options is not None else _read(self.directory / "options.json", {})
+        backend = options.get("journal", "jsonl")
+        if backend == "jsonl":
+            return Journal(self.directory / "journal.jsonl")
+        if backend == "sqlite":
+            return SQLiteJournal(self.directory / "journal.sqlite3")
+        raise SpecError(f"unknown journal backend {backend!r} in {self.directory}")
+
     def _engine(self) -> Engine:
         description = _read(self.directory / "graph.json")
         if description is None:
@@ -263,7 +280,7 @@ class Run:
         options = _read(self.directory / "options.json")
         catalog = self._catalog(options)
         return Engine(load(description, catalog), catalog.protocols, workers=options["workers"],
-                      journal=Journal(self.directory / "journal.jsonl"), time_limit=options.get("time_limit"),
+                      journal=self._journal(options), time_limit=options.get("time_limit"),
                       observe=self.observe, budget=options.get("budget"), firm=bool(options.get("strict")),
                       rebuild=lambda described: load_node(described, catalog))
 
@@ -272,53 +289,55 @@ class Run:
     def start(self, inputs: Mapping[str, Any] | None = None) -> dict:
         """Run from the beginning until the run is done, needs a person, or fails. Returns the state."""
         self._held()
-        if (self.directory / "journal.jsonl").exists():
-            raise SpecError(f"{self.directory} has already been started: resume it")
-        try:
-            _write(self.directory / "inputs.json", dict(inputs or {}))
-        except (TypeError, ValueError) as exc:
-            raise SpecError(f"the inputs are not plain data: {exc}") from None
-        return self._go(lambda engine: engine.run(inputs))
+        with _Lock(self.directory):
+            if self._journal().path.exists():
+                raise SpecError(f"{self.directory} has already been started: resume it")
+            try:
+                _write(self.directory / "inputs.json", dict(inputs or {}))
+            except (TypeError, ValueError) as exc:
+                raise SpecError(f"the inputs are not plain data: {exc}") from None
+            return self._go(lambda engine: engine.run(inputs))
 
     def resume(self, *, budget: Mapping[str, float] | None = None) -> dict:
         """Carry on from the journal. ``budget`` replaces the limits it names: a run that failed for going
         over its budget goes on under a larger one."""
         self._held()
-        if not (self.directory / "journal.jsonl").exists():
-            raise SpecError(f"{self.directory} has not been started")
-        journal = Journal(self.directory / "journal.jsonl")
-        if not journal.read():                      # the process died before the first record was whole
-            return self._go(lambda engine: engine.run(_read(self.directory / "inputs.json", {})), budget)
-        return self._go(lambda engine: engine.resume(), budget)
+        with _Lock(self.directory):
+            journal = self._journal()
+            if not journal.path.exists():
+                raise SpecError(f"{self.directory} has not been started")
+            if not journal.read():                  # the process died before the first record was whole
+                return self._go(lambda engine: engine.run(_read(self.directory / "inputs.json", {})), budget)
+            return self._go(lambda engine: engine.resume(), budget)
 
     def _held(self) -> None:
         if not (self.directory / "graph.json").exists():
             raise SpecError(f"{self.directory} holds no run")
 
     def _go(self, action, budget: Mapping[str, float] | None = None) -> dict:
-        with _Lock(self.directory):
-            if budget:
-                options = _read(self.directory / "options.json")
-                _write(self.directory / "options.json", {**options, "budget": {**(options.get("budget") or {}), **_budget(budget)}})
-            self._absorb()                          # switches set while no process ran it
-            engine = self._now = self._engine()
-            over = threading.Event()
-            watcher = threading.Thread(target=self._watch, args=(engine, over), name="run-controls", daemon=True)
-            watcher.start()
-            try:
-                result = action(engine)
-            except Pending:
-                return self._state(WAITING, used=engine.used)
-            except RunError as exc:
-                return self._state(FAILED, error=str(exc), node=exc.node, problems=exc.problems, used=exc.used)
-            finally:
-                self._now = None
-                over.set()
-                watcher.join()
-                self._absorb()                      # what came too late for this run holds for the next
-            return self._state(DONE if result.complete else STOPPED, outputs=result.outputs, rounds=result.rounds,
-                               limited=list(result.limited), problems=result.problems, used=result.used,
-                               **({"held": result.held} if result.held else {}))
+        """Run the engine and its control watcher while the caller holds the directory lock."""
+        if budget:
+            options = _read(self.directory / "options.json")
+            _write(self.directory / "options.json", {**options, "budget": {**(options.get("budget") or {}), **_budget(budget)}})
+        self._absorb()                          # switches set while no process ran it
+        engine = self._now = self._engine()
+        over = threading.Event()
+        watcher = threading.Thread(target=self._watch, args=(engine, over), name="run-controls", daemon=True)
+        watcher.start()
+        try:
+            result = action(engine)
+        except Pending:
+            return self._state(WAITING, used=engine.used)
+        except RunError as exc:
+            return self._state(FAILED, error=str(exc), node=exc.node, problems=exc.problems, used=exc.used)
+        finally:
+            self._now = None
+            over.set()
+            watcher.join()
+            self._absorb()                      # what came too late for this run holds for the next
+        return self._state(DONE if result.complete else STOPPED, outputs=result.outputs, rounds=result.rounds,
+                           limited=list(result.limited), problems=result.problems, used=result.used,
+                           **({"held": result.held} if result.held else {}))
 
     def stop(self) -> bool:
         """Ask the run this object is running to stop: nothing new starts, and it ends as ``stopped``, to be
@@ -343,10 +362,9 @@ class Run:
         if action not in SWITCHED:
             raise SpecError(f"no action {action!r}: one of {', '.join(SWITCHED)}")
         graph = self._engine().graph
-        path = self.directory / "journal.jsonl"
+        journal = self._journal()
         known = {node.id for node in graph.nodes}
-        if path.exists():
-            known |= {r["node"] for r in Journal(path).read() if r["kind"] == "act"}
+        known |= {r["node"] for r in journal.inspect() if r["kind"] == "act"}
         ids = [nodes] if isinstance(nodes, str) else list(nodes)
         missing = [id for id in ids if id not in known]
         if missing:
@@ -356,14 +374,14 @@ class Run:
         ids = list(dict.fromkeys(ids))
         request = {"nodes": ids, "action": action}
         if _holder(self.directory) is None:
-            if not path.exists():
+            if not journal.path.exists():
                 raise SpecError(f"{self.directory} has not been started")
             try:
                 with _Lock(self.directory):
                     before = self.switches()
                     changed = [id for id in ids if action == "restart" or before.get(id, "active") != SWITCHED[action]]
                     if changed:
-                        recorder = Recorder(Journal(path))
+                        recorder = Recorder(journal)
                         recorder.control(changed, action)
                         recorder.close()
                 return {**self.status(), "changed": changed}
@@ -396,10 +414,12 @@ class Run:
         """Switches left in ``controls/`` when no process is taking them up go into the journal. Holds the lock."""
         from .engine.recorder import Recorder
         waiting = self._controls()
-        path = self.directory / "journal.jsonl"
-        if not waiting or not path.exists():
+        if not waiting:
             return
-        recorder = Recorder(Journal(path))
+        journal = self._journal()
+        if not journal.path.exists():
+            return
+        recorder = Recorder(journal)
         for each in waiting:
             request = _read(each)
             if request:
@@ -410,9 +430,8 @@ class Run:
     def switches(self) -> dict[str, str]:
         """The nodes whose switch is not on, as the journal has it: node -> paused or stopped."""
         from .engine.recorder import SWITCHED
-        path = self.directory / "journal.jsonl"
         found: dict[str, str] = {}
-        records = Journal(path).read() if path.exists() else []
+        records = self._journal().inspect()
         sent = [request for request in map(_read, self._controls()) if request]      # not yet taken up
         for record in [*records, *({"kind": "control", **request} for request in sent)]:
             if record["kind"] == "control" and record.get("action") in SWITCHED:
@@ -464,7 +483,7 @@ class Run:
         self._held()
         state = _read(self.directory / "state.json", {})
         status = RUNNING if _holder(self.directory) else state.get("status", NEW)
-        records = Journal(self.directory / "journal.jsonl").inspect()
+        records = self._journal().inspect()
         view = explain_records(_read(self.directory / "graph.json"), records,
                                status, self.questions(), timeline=timeline)
         if status == FAILED:

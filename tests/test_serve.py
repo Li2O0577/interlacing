@@ -6,6 +6,8 @@ import sys
 import threading
 import time
 
+import pytest
+
 from interlacing import cli
 from interlacing.serve import TOOLS, Server
 
@@ -73,8 +75,9 @@ def test_the_handshake_and_the_tool_list(tmp_path):
     assert server.handle([1, 2])['error']['code'] == -32600
 
 
-def test_a_client_runs_a_graph_and_a_person_answers(tmp_path):
-    server = Server(tmp_path, allow=[HERE])
+@pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
+def test_a_client_runs_a_graph_and_a_person_answers(tmp_path, backend):
+    server = Server(tmp_path, allow=[HERE], journal=backend)
     CALLS.clear()
     failed, said = tool(server, 'check', graph=REVIEWED)
     assert not failed and said['nodes'] == {'survey': 'function', 'editor': 'human'} and CALLS == []
@@ -87,7 +90,10 @@ def test_a_client_runs_a_graph_and_a_person_answers(tmp_path):
     assert not failed and said['questions'] == []
     failed, said = tool(server, 'resume', run=run)
     assert not failed and said['status'] == 'done' and said['outputs'] == {'verdict': [{'approved': True}]} and CALLS == ['survey']
-    assert (tmp_path / run / 'journal.jsonl').exists()             # the same directory the command line works on
+    journal = 'journal.sqlite3' if backend == 'sqlite' else 'journal.jsonl'
+    assert (tmp_path / run / journal).exists()
+    failed, history = tool(server, 'show', run=run, timeline=True)
+    assert not failed and history['timeline'][-1]['kind'] == 'end'
     out = io.StringIO()
     assert cli.main(['status', '--dir', str(tmp_path / run)], out) == 0 and json.loads(out.getvalue())['status'] == 'done'
 

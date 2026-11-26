@@ -39,7 +39,7 @@ from typing import Any
 
 from . import __version__
 from .engine import JournalError
-from .runs import DONE, STOPPED, WAITING, Run, check
+from .runs import DONE, JOURNALS, STOPPED, WAITING, Run, check
 from .spec import SpecError
 
 EXIT = {DONE: 0, WAITING: 3, STOPPED: 4}
@@ -118,6 +118,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--time-limit", type=float, metavar="SECONDS", help="the longest one activation of a node may take")
     run.add_argument("--workspace", metavar="DIRECTORY", help="where the nodes work and send file paths relative to "
                                                               "(default: files in the run's directory)")
+    run.add_argument("--journal", choices=JOURNALS, default="jsonl", help="store run history in JSONL or SQLite")
     reach(run)
     budget: dict = dict(action="append", default=[], metavar="NAME=NUMBER", type=_limit,
                   help="the most the run may use of something its nodes report using, such as tokens=200000")
@@ -150,6 +151,7 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--workers", type=int, default=0, help="threads that run nodes side by side (default: none)")
     serve.add_argument("--time-limit", type=float, metavar="SECONDS", help="the longest one activation of a node may take")
     serve.add_argument("--files", metavar="DIRECTORY", help="a directory graphs may take text from (default: none)")
+    serve.add_argument("--journal", choices=JOURNALS, default="jsonl", help="journal backend for new runs")
     serve.add_argument("--budget", **budget)
     reach(serve)
     served = commands.add_parser("node-serve", help="serve one node, for graphs elsewhere to use as a RemoteNode")
@@ -212,7 +214,8 @@ def main(argv=None, out=None) -> int:
         elif args.command == "serve":
             from .serve import Server
             Server(args.runs, allow=args.allow, processes=args.processes, workers=args.workers, time_limit=args.time_limit,
-                   files=args.files, budget=dict(args.budget), tools=args.tools, apps=args.apps, remotes=args.remote).serve()
+                   files=args.files, budget=dict(args.budget), tools=args.tools, apps=args.apps, remotes=args.remote,
+                   journal=args.journal).serve()
             return 0
         else:
             if args.command == "run":
@@ -220,7 +223,7 @@ def main(argv=None, out=None) -> int:
                 state = Run.create(args.dir, _description(args.graph), allow=args.allow, processes=args.processes,
                                    workers=args.workers, files=_beside(args.graph), time_limit=args.time_limit,
                                    workspace=args.workspace, budget=dict(args.budget), tools=args.tools, apps=args.apps,
-                                   remotes=args.remote).start(inputs)
+                                   remotes=args.remote, journal=args.journal).start(inputs)
             elif args.command == "resume":
                 state = Run(args.dir).resume(budget=dict(args.budget))
             elif args.command == "answer":

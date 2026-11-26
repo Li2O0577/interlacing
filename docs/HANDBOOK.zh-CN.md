@@ -177,15 +177,17 @@ interlacing answer --dir demo-run --json '{"approved": true}'
 interlacing resume --dir demo-run
 ```
 
+新建运行时可加 `--journal sqlite`，将执行历史写入 `journal.sqlite3`。运行目录记录后端选择，之后的 `resume`、`show`、`status` 和 `control` 自动沿用。已有运行默认使用 JSONL。图定义、人工问题和回复、工作区文件都保存在运行目录。Python 入口可用 `Run.create(..., journal="sqlite")`，也可将 `SQLiteJournal(path)` 传给 `Engine`。
+
 用 `interlacing show --dir demo-run` 可以按输入端口查看已记录的投递。等待审批时，`publish.note` 已收到来自 `draft.note` 的投递，`publish.verdict` 还在等 `editor.answer` 的首次投递记录。命令仅读取保存的图和完整日志行，无需加载节点代码。正在运行时展示的也是已落盘的证据。图中的增删节点与接线会根据已提交的变更重建。
 
 加 `--timeline` 按日志顺序看激活轮次、质疑与答复、节点开关和上报用量。新日志的 `elapsed_seconds` 是本次激活记录片段的墙钟耗时（包括等待）；旧记录没有耗时字段。失败运行另有 `failure`。用 `--format mermaid` 或 `--format dot` 导出节点与端口连线。若外部替换图只留下摘要，输出会标明最后已知拓扑。[模拟结果的两种审查路径](../examples/graphs/simulation_review.py)
 
 `--timeline` 同时返回 `provenance`。可从输出的初始版本和替换版本找到对应记录，再通过 `scope_id` 和 `event_seq` 定位执行、查看它读过的投递及生产记录。子图完成后即使清理恢复日志，`children` 也保留这些元数据。旧日志可继续查看，缺失或无法唯一匹配的投递来源会明确标记。
 
-`run/resume` 的退出码：`0` 完成，`1` 失败或被拒绝，`3` 等人，`4` 已停止。`status` 查运行状态和问题，`files` 查文件归属，`control pause|resume|stop|restart` 操作单个节点或管理树。目录内有 `graph.json`、`options.json`、`inputs.json`、`journal.jsonl`、`state.json` 和问题、答复、文件。继续整次运行用 `resume --dir`；让某个暂停节点恢复用 `control resume NODE --dir`。
+`run/resume` 的退出码：`0` 完成，`1` 失败或被拒绝，`3` 等人，`4` 已停止。`status` 查运行状态和问题，`files` 查文件归属，`control pause|resume|stop|restart` 操作单个节点或管理树。目录内有 `graph.json`、`options.json`、`inputs.json`、选定的日志、`state.json` 和问题、答复、文件。SQLite 日志旁可能出现 `-wal` 和 `-shm` 文件。继续整次运行用 `resume --dir`，让某个暂停节点恢复用 `control resume NODE --dir`。
 
-**MCP 入口。** 让客户端以 stdio 启动 `interlacing serve --runs /path/to/runs`，按需添加上述能力参数。常用调用顺序是 `guide → check → start → status`；遇到人工问题用 `answer → resume`。另有 `runs`、`stop`、`control`。长任务可在 `start/resume` 传 `wait: false` 后查询状态。要单独提供一个远程节点，使用 `node-serve`。[MCP 工具参数](GRAPH.md#mcp-服务)
+**MCP 入口。** 让客户端以 stdio 启动 `interlacing serve --runs /path/to/runs`，按需添加上述能力参数。加 `--journal sqlite` 后，此服务新建的运行使用 SQLite。常用调用顺序是 `guide → check → start → status`；遇到人工问题用 `answer → resume`。另有 `runs`、`stop`、`control`。长任务可在 `start/resume` 传 `wait: false` 后查询状态。要单独提供一个远程节点，使用 `node-serve`。[MCP 工具参数](GRAPH.md#mcp-服务)
 
 **试用 MCP 审查模拟。** 在 `examples/data` 中启动服务，让客户端以 stdio 运行 `python -m interlacing.cli serve --runs /绝对路径/runs --allow steps`。将 [cooling_review.json](../examples/data/cooling_review.json) 的内容作为 `start.graph`，输入 `{"steps":100}`。B1 会收到 B2 的初稿 36.6032。用同一运行编号调用 `show`（`timeline: true`），可看到 B2 已经运行、B1 正在等人。在这个示例里，初稿误把百分数当作比例。用 `answer` 提交 `{"units":"percent","reading":36.6032}`，再调 `resume`。完成后的 `outputs.report` 只含 0.366，`used.simulations` 为 1。
 
@@ -221,7 +223,7 @@ interlacing resume --dir demo-run
 | 模块 | 名称 |
 |---|---|
 | `base` | `Node`, `Port`, `Firing`, `Context`, `Schema`, `Edge`, `Invalid`, `Protocol`, `Protocols`, `Delivery`, `Envelope`, `Ref`, `Graph`, `GraphBuilder`, `Change`, `GraphError`, `NodeError`, `Method` |
-| `engine` | `Engine`, `Result`, `RunError`, `OverBudget`, `Journal`, `Transport` |
+| `engine` | `Engine`, `Result`, `RunError`, `OverBudget`, `Journal`, `SQLiteJournal`, `Transport` |
 | `nodes` | `FunctionNode`, `AgentNode`, `Tool`, `ProcessNode`, `SourceNode`, `SinkNode`, `HumanNode`, `GraphNode`, `Desk`, `IsolatedNode`, `WorkerNode`, `FolderNode`, `RemoteNode`, `serve_node`, `time_left`, `Workspace`, `Area`, `ToolPool`, `node`, `as_node` |
 | `methods` | `Chain`, `Loop`, `Fan`, `Tree`, `Star`, `Governed`, `Pool` |
 | `blocks` | `Block`, `seq`, `par` |

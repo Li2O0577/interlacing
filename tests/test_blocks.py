@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from interlacing import SQLiteJournal
 from interlacing.base import GraphError, Port
 from interlacing.blocks import Block, par, seq
 from interlacing.engine import Engine, Journal, RunError
@@ -103,7 +104,8 @@ def test_what_happens_inside_a_block_is_told_to_the_outer_observer():
                       ('ended', None, ['o', 's1']), ('ended', None, ['o']), ('ended', None, None)]
 
 
-def test_after_a_restart_a_block_goes_on_inside_instead_of_starting_over(tmp_path):
+@pytest.mark.parametrize("backend", [Journal, SQLiteJournal])
+def test_after_a_restart_a_block_goes_on_inside_instead_of_starting_over(tmp_path, backend):
     def build():
         return Chain(seq(fn(fragile), fn(fragile), fn(fragile), name='three')('block'), fn(add_one)('after')).build(DEFAULT)
     SEEN.clear()
@@ -112,24 +114,27 @@ def test_after_a_restart_a_block_goes_on_inside_instead_of_starting_over(tmp_pat
     def break_on_second(event):
         if event['event'] == 'finished' and event.get('within') == ['block'] and event['node'] == 's1':
             BROKEN.append(True)
+    journal = backend(tmp_path / 'journal')
     with pytest.raises(RunError, match='node block failed in round 1: node s2 failed in round 1: not yet'):
-        Engine(build(), DEFAULT, journal=Journal(tmp_path / 'j.jsonl'), observe=break_on_second).run({'in': 1})
-    assert SEEN == [1, 101] and (tmp_path / 'j.jsonl.d' / 'block-1.jsonl').exists()
+        Engine(build(), DEFAULT, journal=journal, observe=break_on_second).run({'in': 1})
+    assert SEEN == [1, 101] and journal.inner('block', 1).read()[-1]['kind'] == 'act'
     BROKEN.clear()
-    result = Engine(build(), DEFAULT, journal=Journal(tmp_path / 'j.jsonl')).resume()
+    result = Engine(build(), DEFAULT, journal=backend(journal.path)).resume()
     assert result.last('out') == 302 and SEEN == [1, 101, 101, 201]         # s1 did not run again
-    assert Engine(build(), DEFAULT, journal=Journal(tmp_path / 'j.jsonl')).resume().last('out') == 302
+    assert journal.inner('block', 1).read() == []
+    assert Engine(build(), DEFAULT, journal=backend(journal.path)).resume().last('out') == 302
 
 
-def test_finished_blocks_keep_separate_history_after_their_journals_are_removed(tmp_path):
-    from interlacing.inspection import explain
+@pytest.mark.parametrize("backend", [Journal, SQLiteJournal])
+def test_finished_blocks_keep_separate_history_after_their_journals_are_removed(tmp_path, backend):
+    from interlacing.inspection import explain_records
     inner = seq(fn(add_one), fn(double), name='shared')
     graph = Fan(inner('left'), inner('right')).build(DEFAULT)
-    path = tmp_path / 'run.jsonl'
-    assert Engine(graph, DEFAULT, workers=2, journal=Journal(path)).run({'in': 3}).complete
-    assert not (tmp_path / 'run.jsonl.d').exists()
+    journal = backend(tmp_path / 'journal')
+    assert Engine(graph, DEFAULT, workers=2, journal=journal).run({'in': 3}).complete
+    assert journal.inner('left', 1).read() == journal.inner('right', 1).read() == []
 
-    provenance = explain(dump(graph), path, 'done', [], timeline=True)['provenance']
+    provenance = explain_records(dump(graph), journal.inspect(), 'done', [], timeline=True)['provenance']
     left, right = provenance['children']
     assert left['scope_id'] and right['scope_id'] and left['scope_id'] != right['scope_id']
     assert {left['parent_event_seq'], right['parent_event_seq']} == {

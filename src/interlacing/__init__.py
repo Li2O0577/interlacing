@@ -27,6 +27,7 @@ _PUBLIC = {
     "Graph": "base", "GraphBuilder": "base", "Change": "base", "GraphError": "base", "NodeError": "base", "Method": "base",
     # engine
     "Engine": "engine", "Result": "engine", "RunError": "engine", "OverBudget": "engine", "Journal": "engine", "Transport": "engine",
+    "SQLiteJournal": "engine",
     # parts
     "FunctionNode": "nodes", "AgentNode": "nodes", "Tool": "nodes", "ProcessNode": "nodes", "SourceNode": "nodes",
     "SinkNode": "nodes", "HumanNode": "nodes", "GraphNode": "nodes", "Desk": "nodes", "IsolatedNode": "nodes",

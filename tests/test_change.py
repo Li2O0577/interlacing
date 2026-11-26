@@ -147,12 +147,14 @@ def grown(ctx, x):
     return x
 
 
-def test_a_run_directory_takes_a_grown_graph_up(tmp_path):
+@pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
+def test_a_run_directory_takes_a_grown_graph_up(tmp_path, backend):
     from interlacing.runs import Run
     FAILED["once"] = False
     described = {"nodes": [{"id": "grow", "kind": "function", "function": f"{HERE}.grown", "context": True,
                             "inputs": ["x"], "outputs": ["y"]}], "inputs": {"in": "grow.x"}}
-    run = Run.create(tmp_path / "run", described, allow=[HERE])
+    run = Run.create(tmp_path / "run", described, allow=[HERE], journal=backend)
     assert run.start({"in": 4})["status"] == "failed"
     state = Run(tmp_path / "run").resume()
     assert state["status"] == "done" and state["outputs"] == {"result": [16]}
+    assert set(run.show(timeline=True)["nodes"]) == {"grow", "sq", "flaky"}

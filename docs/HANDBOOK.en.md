@@ -177,15 +177,17 @@ interlacing answer --dir demo-run --json '{"approved": true}'
 interlacing resume --dir demo-run
 ```
 
+For a new run, add `--journal sqlite` to store its execution history in `journal.sqlite3`. The run directory records that selection, so later `resume`, `show`, `status` and `control` use it automatically. Existing runs default to JSONL. Graph definitions, human questions and answers, and workspace files are still kept in the run directory. Python code can select `Run.create(..., journal="sqlite")` or pass `SQLiteJournal(path)` to `Engine`.
+
 Use `interlacing show --dir demo-run` to inspect recorded deliveries by input port. While the run waits for approval, `publish.note` has a delivery from `draft.note` and `publish.verdict` awaits the first recorded delivery from `editor.answer`. The command reads the saved graph and complete journal lines without loading node code. It reports historical evidence even for a running process. Committed additions, removals and wiring changes reconstruct the recorded graph.
 
 Add `--timeline` to inspect activation rounds, challenges and verdicts, switches and usage in journal order. New activation records include `elapsed_seconds`, wall time for that segment including waits. Older records omit it. Failed runs also return `failure`. Export node and port connections with `--format mermaid` or `--format dot`. An external graph replacement recorded only as a digest leaves the last known topology labeled as such. [Two review paths for a simulation](../examples/graphs/simulation_review.py)
 
 With the timeline, `provenance` links each recorded output slot to its original and replacement records. Use the `scope_id` and `event_seq` to locate a record, then follow its reads to the delivery and producer. Completed subgraphs retain this metadata under `children` after their recovery journals are cleaned up. Legacy records can be viewed with an unknown scope. Missing or ambiguous delivery references are marked explicitly.
 
-Exit codes for `run/resume`: `0` completed, `1` failed or refused, `3` waiting for a person, `4` stopped. `status` inspects state and questions, `files` shows file ownership, and `control pause|resume|stop|restart` operates on nodes or their managed subtree. The directory holds `graph.json`, `options.json`, `inputs.json`, `journal.jsonl`, `state.json`, questions, answers and files. Use `resume --dir` to continue a run and `control resume NODE --dir` to switch on a paused node.
+Exit codes for `run/resume`: `0` completed, `1` failed or refused, `3` waiting for a person, `4` stopped. `status` inspects state and questions, `files` shows file ownership, and `control pause|resume|stop|restart` operates on nodes or their managed subtree. The directory holds `graph.json`, `options.json`, `inputs.json`, the selected journal, `state.json`, questions, answers and files. SQLite may create `-wal` and `-shm` sidecars alongside its journal. Use `resume --dir` to continue a run and `control resume NODE --dir` to switch on a paused node.
 
-**MCP entry point.** Configure the client to launch `interlacing serve --runs /path/to/runs` over stdio, adding the host capabilities it needs. A typical sequence is `guide → check → start → status`; use `answer → resume` for human input. Other tools are `runs`, `stop` and `control`. For a long job, pass `wait: false` to `start/resume` and query its status. To serve a single remote node, use `node-serve`. [MCP tool parameters](GRAPH.en.md)
+**MCP entry point.** Configure the client to launch `interlacing serve --runs /path/to/runs` over stdio, adding the host capabilities it needs. Add `--journal sqlite` to select SQLite for new runs from that server. A typical sequence is `guide → check → start → status`; use `answer → resume` for human input. Other tools are `runs`, `stop` and `control`. For a long job, pass `wait: false` to `start/resume` and query its status. To serve a single remote node, use `node-serve`. [MCP tool parameters](GRAPH.en.md)
 
 **Try the simulation review over MCP.** From `examples/data`, configure the client to launch `python -m interlacing.cli serve --runs /absolute/path/to/runs --allow steps` over stdio. Pass the contents of [cooling_review.json](../examples/data/cooling_review.json) as `start.graph` with inputs `{"steps":100}`. B1 receives B2’s draft, 36.6032. Call `show` with the run ID and `timeline: true` to see that B2 ran and B1 awaits a person. In this example the draft used a percentage as a fraction. Submit `{"units":"percent","reading":36.6032}` with `answer`, then call `resume`. The final `outputs.report` contains only 0.366 and `used.simulations` is 1.
 
@@ -221,7 +223,7 @@ All names below are available directly from `interlacing`. For the installed sig
 | Module | Names |
 |---|---|
 | `base` | `Node`, `Port`, `Firing`, `Context`, `Schema`, `Edge`, `Invalid`, `Protocol`, `Protocols`, `Delivery`, `Envelope`, `Ref`, `Graph`, `GraphBuilder`, `Change`, `GraphError`, `NodeError`, `Method` |
-| `engine` | `Engine`, `Result`, `RunError`, `OverBudget`, `Journal`, `Transport` |
+| `engine` | `Engine`, `Result`, `RunError`, `OverBudget`, `Journal`, `SQLiteJournal`, `Transport` |
 | `nodes` | `FunctionNode`, `AgentNode`, `Tool`, `ProcessNode`, `SourceNode`, `SinkNode`, `HumanNode`, `GraphNode`, `Desk`, `IsolatedNode`, `WorkerNode`, `FolderNode`, `RemoteNode`, `serve_node`, `time_left`, `Workspace`, `Area`, `ToolPool`, `node`, `as_node` |
 | `methods` | `Chain`, `Loop`, `Fan`, `Tree`, `Star`, `Governed`, `Pool` |
 | `blocks` | `Block`, `seq`, `par` |

@@ -282,14 +282,15 @@ def plain(ctx, x):
     return x * 10
 
 
-def test_a_run_directory_is_controlled_between_goes(tmp_path, capsys):
+@pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
+def test_a_run_directory_is_controlled_between_goes(tmp_path, capsys, backend):
     described = {"nodes": [{"id": "boss", "kind": "function", "function": f"{HERE}.stopping_boss", "context": True,
                             "inputs": ["x"], "outputs": ["y"]},
                            {"id": "worker", "kind": "function", "function": f"{HERE}.plain", "context": True,
                             "inputs": ["x"], "outputs": ["y"]}],
                  "edges": [{"from": "boss.y", "to": "worker.x"}],
                  "inputs": {"in": "boss.x"}, "outputs": {"out": "worker.y"}, "manages": {"boss": ["worker"]}}
-    run = Run.create(tmp_path / 'run', described, allow=[HERE])
+    run = Run.create(tmp_path / 'run', described, allow=[HERE], journal=backend)
     state = run.start({'in': 2})
     assert state['status'] == 'stopped' and state['held'] == {'worker': 'stopped'}
     assert Run(tmp_path / 'run').status()['switches'] == {'worker': 'stopped'}

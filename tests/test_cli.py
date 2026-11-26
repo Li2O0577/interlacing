@@ -69,10 +69,11 @@ def test_check_describes_a_graph_without_running_it(tmp_path):
     assert call('check', tmp_path / 'missing.json')[1]['error'].startswith('no such file')
 
 
-def test_a_run_stops_for_a_person_and_goes_on_once_they_have_answered(tmp_path):
+@pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
+def test_a_run_stops_for_a_person_and_goes_on_once_they_have_answered(tmp_path, backend):
     graph, run = write(tmp_path / 'g.json', GOVERNED), tmp_path / 'run'
     CALLS.clear()
-    code, said = call('run', graph, '--dir', run, '--input', 'in=the bridge', '--allow', HERE)
+    code, said = call('run', graph, '--dir', run, '--input', 'in=the bridge', '--allow', HERE, '--journal', backend)
     assert code == 3 and said['status'] == 'waiting'
     assert said['questions'] == [{'id': 'operator-1', 'node': 'operator', 'round': 1, 'request': {'result': 'surveyed the bridge'}}]
     assert call('status', '--dir', run)[1]['status'] == 'waiting'
@@ -84,7 +85,22 @@ def test_a_run_stops_for_a_person_and_goes_on_once_they_have_answered(tmp_path):
     assert code == 0 and said['status'] == 'done' and said['outputs'] == {'out': ['surveyed the bridge: released']}
     assert CALLS == ['survey'] and said['rounds'] == {'lead': 2, 'survey': 1, 'operator': 1}
     assert call('resume', '--dir', run)[1]['outputs'] == {'out': ['surveyed the bridge: released']}     # done stays done
-    assert sorted(p.name for p in run.iterdir()) == ['answers', 'files', 'graph.json', 'inputs.json', 'journal.jsonl', 'options.json', 'questions', 'state.json']
+    journal = 'journal.sqlite3' if backend == 'sqlite' else 'journal.jsonl'
+    sidecars = {f'{journal}-wal', f'{journal}-shm'} if backend == 'sqlite' else set()
+    assert {p.name for p in run.iterdir()} - sidecars == {
+        'answers', 'files', 'graph.json', 'inputs.json', journal, 'options.json', 'questions', 'state.json'}
+
+
+@pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
+def test_a_competing_start_cannot_replace_inputs_while_the_directory_is_locked(tmp_path, backend):
+    from interlacing.runs import _Lock
+    run = Run.create(tmp_path, {'method': 'chain', 'nodes': [node('a', 'survey')]},
+                     allow=[HERE], journal=backend)
+    with _Lock(tmp_path):
+        with pytest.raises(SpecError, match='is being run'):
+            Run(tmp_path).start({'in': 'competing input'})
+        assert not (tmp_path / 'inputs.json').exists()
+    assert run.start({'in': 'the bridge'})['outputs'] == {'out': ['surveyed the bridge']}
 
 
 def test_a_failed_run_says_where_and_can_be_resumed(tmp_path):
@@ -277,11 +293,13 @@ def test_provenance_uses_emission_slots_when_activations_commit_out_of_order():
     assert second == [{'event_seq': 1, 'message': {'token': 'out#2', 'ordinal': 1}, 'replaces_event_seq': None}]
 
 
+@pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
 @pytest.mark.parametrize("cut_after_correction", [False, True])
-def test_resumed_cooling_review_replaces_the_existing_report(tmp_path, monkeypatch, cut_after_correction):
+def test_resumed_cooling_review_replaces_the_existing_report(tmp_path, monkeypatch, cut_after_correction, backend):
     data = Path(__file__).resolve().parents[1] / 'examples' / 'data'
     monkeypatch.syspath_prepend(str(data))
-    run = Run.create(tmp_path / 'simulation', json.loads((data / 'cooling_review.json').read_text()), allow=['steps'])
+    run = Run.create(tmp_path / 'simulation', json.loads((data / 'cooling_review.json').read_text()),
+                     allow=['steps'], journal=backend)
     waiting = run.start({'steps': 100})
     assert waiting['status'] == 'waiting' and waiting['questions'][0]['request'] == 36.6032
     assert run.show()['nodes']['b2']['activation_recorded']
@@ -291,17 +309,18 @@ def test_resumed_cooling_review_replaces_the_existing_report(tmp_path, monkeypat
         # Kill a separate process exactly after A durably corrected the input, before B2 runs again.
         script = """
 import os, sys
-from interlacing import Journal
+from interlacing import Journal, SQLiteJournal
 from interlacing.runs import Run
-write = Journal.write
+journal = {'jsonl': Journal, 'sqlite': SQLiteJournal}[sys.argv[2]]
+write = journal.write
 def cut(self, record):
     write(self, record)
     if record.get('redos'):
         os._exit(37)
-Journal.write = cut
+journal.write = cut
 Run(sys.argv[1]).resume()
 """
-        process = subprocess.run([sys.executable, '-c', script, str(run.directory)], cwd=data, timeout=20)
+        process = subprocess.run([sys.executable, '-c', script, str(run.directory), backend], cwd=data, timeout=20)
         assert process.returncode == 37
     done = Run(run.directory).resume()
     assert done['status'] == 'done' and done['outputs'] == {'report': [0.366]}
