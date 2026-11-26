@@ -4,6 +4,16 @@ Versions before 1.0 may change any interface; each change is listed here. From 1
 by `interlacing` and the formats of graph files, run directories and journals change incompatibly only
 with a new major version.
 
+## Unreleased
+
+- Keep local JSONL runs as the default. SQLite run directories can opt into durable delivery, inspect earlier events and fork an independent run.
+- Use PostgreSQL for project membership, task assignment and versioned human approvals. Workers can execute independent root branches in parallel and reclaim interrupted runs. Durable value and artifact edges support challenges, explanations and corrections.
+- Fork a settled position in a static root graph and revise a committed JSON output. The fork records the reason and message version. Downstream work follows the graph's correction policies, while the parent retains its original results and approvals.
+- Subscribe to root run progress over HTTP with `Client.stream_progress()`. Resume from a recorded event number and report business stages with `ctx.progress()`.
+- Configure synchronous function retries for connection errors, timeouts or both. Worker takeover preserves the remaining attempts. A supervisor can authorize another budget after exhaustion.
+
+See the [service and migration guide](docs/POSTGRES.md) and [branch verification record](docs/BRANCH_REVIEW.md).
+
 ## 0.16.2
 
 - Inspect recorded dependencies, waits and revisions with `interlacing show` and the MCP `show` tool.

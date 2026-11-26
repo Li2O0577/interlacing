@@ -17,8 +17,9 @@
 ## 安装
 
 ```sh
-pip install interlacing
-pip install -e .            # 或者从代码检出安装
+pip install interlacing              # 已发布版
+pip install -e .                     # 安装当前检出的核心
+pip install -e ".[postgres]"         # 安装当前检出的核心及协作服务
 ```
 
 需要 Python 3.11 或更高版本，支持 Linux、macOS 和 Windows。
@@ -238,9 +239,9 @@ interlacing resume --dir /tmp/run                                               
 
 完整说明见 [docs/GRAPH.md](docs/GRAPH.md)（英文版 [docs/GRAPH.en.md](docs/GRAPH.en.md)）。二十个可以直接运行的例子在 [examples/graphs/](examples/graphs/)，写成 JSON 的图在 [examples/data/](examples/data/)。
 
-本分支支持 PostgreSQL 多人审核。[协作服务说明](docs/POSTGRES.md)给出了认领、提交和接手续跑的操作示例。[与 LangGraph 的任务对照和检测记录](docs/LANGGRAPH_COMPARISON.md)列出了本地与服务端能运行哪些图，以及哪些能力已有对照实验。
+主管可以从已签字的报价另开一条运行，修改金额，让受影响的审核人重新签字，同时保留原审批记录。主管也可以订阅根图进度，为耗尽自动尝试的暂时故障发起新一轮重试。[协作服务说明与示例](docs/POSTGRES.md)。[与 LangGraph 的任务对照和检测记录](docs/LANGGRAPH_COMPARISON.md)列出了本地与服务端能运行哪些图，以及哪些能力已有对照实验。
 
-[分支审查报告](docs/BRANCH_REVIEW.md)记录了可复现的问题、测试环境和备份恢复结果。[下一轮实施计划](docs/NEXT_PLAN.md)列出了五项能力及其验收条件。
+[分支审查报告](docs/BRANCH_REVIEW.md)记录了可复现的问题、测试环境和备份恢复结果。[下一轮实施计划](docs/NEXT_PLAN.md)列出已交付能力，以及创建请求去重、嵌套并行等后续工作。
 
 ## 测试
 
@@ -256,11 +257,11 @@ python scripts/bench_engine.py       # 引擎给每个信封增加的开销（�
 
 - 接着跑是“至少一次”：被打断的节点会重跑。`ctx.once` 让图外做过的事不再重复，只有“做完”到“记下”之间的一瞬间例外；要覆盖这一瞬间，把 `ctx.key` 交给外部服务去重。
 - 边只在进程内。节点可以在别处（`RemoteNode`），但节点之间的流和调用不跨进程；`Transport` 是做这件事的位置，目前那里什么都没有。
-- 开关和上下级只在同一张图里：节点内部再跑的一张图里的节点，从外面拨不到。Windows 上被暂停的外部程序会继续跑，只是节点在等。
+- 上下级关系定义在各自的图里。内部图正在运行时，操作者可通过 `box/inner` 这样的路径控制其中的节点。Windows 上被暂停的外部程序会继续跑，只是节点在等。
 - 两种模型接口都用替身服务测过：工具、图片、思考、流式，以及服务繁忙时的等待重试。在真实服务上只用很小的请求试过一次，思考和图片输入没有在真实服务上试过。设备节点只接触过替身。
 - 在引擎自己进程里超时的节点是被放弃，而不是被杀掉。`IsolatedNode` 和 `ProcessNode` 会被杀掉。
 - `allow` 是一份模块清单，图可以点名其中的函数。它不是沙箱，`IsolatedNode` 也不是：它的进程拥有启动它的进程的全部权限。worker 的命令和工具池里的工具也一样：文件工具出不了节点的区域，命令可以。
-- MCP 服务只走 stdio。测试里由参考客户端跑通过，还没有接过桌面应用。
+- MCP 服务只走 stdio。参考客户端已通过自动测试，MCP Inspector 图形客户端也已跑通模拟审查。
 
 ## 许可
 

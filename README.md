@@ -2,7 +2,7 @@
 
 <p align="center"><img src="https://raw.githubusercontent.com/Li2O0577/interlacing/main/docs/images/interlacing.jpg" alt="interlacing" width="720"></p>
 
-**English** · [中文](https://github.com/Li2O0577/interlacing/blob/main/README.zh-CN.md)
+**English** · [中文](README.zh-CN.md)
 
 Join anything into a graph and run it.
 
@@ -17,8 +17,9 @@ The engine runs the graph and looks after the run: outputs are checked, usage is
 ## Install
 
 ```sh
-pip install interlacing
-pip install -e .            # or from a checkout
+pip install interlacing              # published release
+pip install -e .                     # core from this checkout
+pip install -e ".[postgres]"         # this checkout with the collaboration service
 ```
 
 Python 3.11 or later, on Linux, macOS and Windows.
@@ -218,11 +219,11 @@ Model keys are read from the environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` 
 
 ## What it is for
 
-Three worked cases are in [docs/CASES.md](https://github.com/Li2O0577/interlacing/blob/main/docs/CASES.md) (in Chinese). In short:
+Three worked cases are in [docs/CASES.md](docs/CASES.md) (in Chinese). In short:
 
 | Case | How it is built |
 |---|---|
-| A physical agent: a multimodal model plans gripper poses as points in space, a controller executes, and the next observation decides what follows | `Loop(observe, planning, act)`; the model's measuring tools are nodes on call edges; the action contract is a check on the plan port, so a bad plan goes back to the model with the reason and never reaches the controller; plans and seconds are budgets. Runnable with stand-ins: [examples/graphs/planner_and_arm.py](https://github.com/Li2O0577/interlacing/blob/main/examples/graphs/planner_and_arm.py) |
+| A physical agent: a multimodal model plans gripper poses as points in space, a controller executes, and the next observation decides what follows | `Loop(observe, planning, act)`; the model's measuring tools are nodes on call edges; the action contract is a check on the plan port, so a bad plan goes back to the model with the reason and never reaches the controller; plans and seconds are budgets. Runnable with stand-ins: [examples/graphs/planner_and_arm.py](examples/graphs/planner_and_arm.py) |
 | A modelling assistant: a lead, one owner per question, a solver and a critic who argue until the answer is proved, a person who may step in anywhere | each question is a `Block` holding a `Loop(solve, critic)`; "no proof, not done" is a port check; questions run in `seq`; the person is the operator of a `Governed` tree; the run directory survives restarts |
 | A mathematician: a lead sends out explorers in parallel, each hands its work to a proof checker and reports back when it passes | `Pool(lead, explorer, size=10)` with `workers`; each explorer is a `Loop(prove, check)`; three directions given, three explorers exist |
 
@@ -241,11 +242,11 @@ The kernel carries information and looks after the run. How a model thinks, how 
 
 Each layer uses only the layers below it. The engine knows no particular node, protocol or method; a test in `tests/test_engine.py` holds it to that. Inside, the engine is a few small parts, each with one job: the mailboxes a graph becomes (`wiring`), when a node may run (`scheduler`), what is checked and what follows a problem (`checks`), the budget (`ledger`), the journal (`recorder`), time limits (`clock`).
 
-The full description is [docs/GRAPH.en.md](https://github.com/Li2O0577/interlacing/blob/main/docs/GRAPH.en.md) (also [in Chinese](https://github.com/Li2O0577/interlacing/blob/main/docs/GRAPH.md)). Twenty examples that run as they stand are in [examples/graphs/](https://github.com/Li2O0577/interlacing/tree/main/examples/graphs), and graphs written as JSON in [examples/data/](https://github.com/Li2O0577/interlacing/tree/main/examples/data).
+The full description is [docs/GRAPH.en.md](docs/GRAPH.en.md) (also [in Chinese](docs/GRAPH.md)). Twenty examples that run as they stand are in [examples/graphs/](examples/graphs), and graphs written as JSON in [examples/data/](examples/data).
 
-On the PostgreSQL feature branch, see the [collaboration service guide](docs/POSTGRES.md) for task assignment, claims and recovery. The [capability review against LangGraph (Chinese)](docs/LANGGRAPH_COMPARISON.md) records the tested scheduling difference and the limits of the service API.
+A manager can fork an approved quote, change its value and send it back to the affected reviewer while retaining the original approval. The PostgreSQL service also streams root run progress and supports bounded retries for transient failures. See the [service guide and examples](docs/POSTGRES.md). The [capability review against LangGraph (Chinese)](docs/LANGGRAPH_COMPARISON.md) records the tested scheduling difference and the limits of the service API.
 
-The [branch review](docs/BRANCH_REVIEW.md) records reproduced issues and recovery checks. The [implementation plan](docs/NEXT_PLAN.md) lists acceptance criteria for the next five capabilities. Both documents are in Chinese.
+For the matching source and guides of a published version, open its tag on the [GitHub releases page](https://github.com/Li2O0577/interlacing/releases). The [branch review](docs/BRANCH_REVIEW.md) records reproduced issues and recovery checks. The [implementation plan](docs/NEXT_PLAN.md) covers the delivered features and the remaining work on duplicate start requests and nested parallelism. Both documents are in Chinese.
 
 ## Tests
 
@@ -261,11 +262,11 @@ The tests run on Linux, macOS and Windows, with scripted models, a stand-in mode
 
 - Taking a run up again is at-least-once: an interrupted node runs again. `ctx.once` keeps what was done outside the graph from being done again, except in the moment between the deed and its record; for that, give the outside service `ctx.key`.
 - Edges are in-process. A node can live elsewhere (`RemoteNode`), but streams and calls between nodes do not cross processes; `Transport` is the place for that, and nothing is there yet.
-- Switches and managers hold within one graph: the nodes of a graph run inside a node cannot be switched from outside it. On Windows a paused program keeps running; only its node waits.
+- Switches and managers hold within one graph: operators can address nodes in an active nested graph by path, for example `box/inner`. On Windows a paused program keeps running; only its node waits.
 - Both model interfaces are tested against a stand-in service: tools, pictures, thinking, streams, and waiting when the service is busy. Against a real service they have been tried once, with very small requests; thinking and picture input have not. Device nodes have only met stand-ins.
 - A node that overruns in the engine's own process is abandoned, not killed. `IsolatedNode` and `ProcessNode` are killed.
 - `allow` is a list of modules whose functions a graph may name. It is not a sandbox, and neither is `IsolatedNode`: its process has the rights of the one that started it. The same holds for a worker's commands and a pool's tools: the file tools stay in a node's area, a command does not have to.
-- The MCP server speaks over stdio only. It has been run by the reference client in tests, not yet by a desktop application.
+- The MCP server speaks over stdio only. The reference client exercises it in tests, and MCP Inspector has completed the simulation review.
 
 ## License
 

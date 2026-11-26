@@ -1,6 +1,6 @@
 # interlacing · Python user and maintainer guide
 
-[中文](HANDBOOK.zh-CN.md) · **English** · For **0.16.2**, Python 3.11+. Start with the first two examples if you are new. If you inherited a graph, start with the maintainer map at the end.
+[中文](HANDBOOK.zh-CN.md) · **English** · Python 3.11+. The first example works with the published **0.16.2**. For durable SQLite runs, PostgreSQL collaboration and the newer CLI commands, install this branch from its repository root with `python -m pip install -e ".[postgres]"` (use `-e .` for local runs). Start with the first two examples if you are new. If you inherited a graph, start with the maintainer map at the end.
 
 [Quick start](#start) · [Graphs and ordering](#graph) · [Edge protocols](#edges) · [Choosing nodes](#nodes) · [Composition](#compose) · [Execution and recovery](#run) · [Challenges and corrections](#review) · [JSON, CLI and MCP](#cli) · [Maintenance and troubleshooting](#maintain)
 
@@ -219,6 +219,8 @@ Use the PostgreSQL collaboration service for project memberships, human task ass
 <a id="maintain"></a>
 
 ## 9 · Maintainer map and troubleshooting
+
+**Publishing a version.** Set `__version__` in `src/interlacing/__init__.py`, update the tested pip install example in both handbooks and move the unreleased changes under the version in the changelog. Use a fresh tag that exactly matches the package version with a `v` prefix. For example, Python version `0.17.0b1` takes tag `v0.17.0b1`. Target the tested commit and mark a beta as a GitHub pre-release. Publishing the release triggers the test, build and PyPI upload workflow. Check the separate PostgreSQL CI job on that commit as well. Earlier tags and packages remain available. [Release workflow](../.github/workflows/release.yml) · [CI workflow](../.github/workflows/ci.yml)
 
 Start with the layer that owns the behavior, then find a test that exercises its observable effects.
 

@@ -457,7 +457,7 @@ study = seq(clean, par(review, review), publish)   # 可以嵌套
 
 块里面的运行属于外面的运行：
 
-- 外面有日志时，里面的运行在旁边记自己的日志（`<日志>.d/<节点>-<轮次>.jsonl`）。中断后续跑，块从里面断掉的地方接着跑，已经完成的节点不重做。块的那次激活记入外面的日志之后，里面的日志就删掉。
+- 外面使用默认 JSONL 日志时，里面的运行在旁边记自己的日志（`<日志>.d/<节点>-<轮次>.jsonl`）。中断后续跑，块从里面断掉的地方接着跑，已经完成的节点不重做。块的那次激活记入外面的日志之后，里面的日志就删掉。
 - 监听口会收到里面的事件，事件上的 `within` 写着它在哪个块里，嵌套几层就有几个名字。
 - 时间上限按里面的每个节点计，不按整个块计。
 - 里面发现的输出问题也记在外面，节点名写成 `块/节点`。
@@ -681,7 +681,7 @@ again = read("graph.json", Catalog(allow=["mypkg"]))         # again.digest == g
 
 ## 命令行和运行目录
 
-安装后有命令 `interlacing`（也可以用 `python -m interlacing.cli`）。每个命令都输出 JSON。
+安装后有命令 `interlacing`（也可以用 `python -m interlacing.cli`）。多数运行命令输出 JSON。
 
 | 命令 | 作用 |
 |---|---|
@@ -693,6 +693,9 @@ again = read("graph.json", Catalog(allow=["mypkg"]))         # again.digest == g
 | `status --dir RUN` | 输出运行的状态和待答的问题 |
 | `files --dir RUN` | 列出工作区里的文件，以及每个文件是哪个节点在第几次激活里写的 |
 | `control 动作 节点... --dir RUN [--team]` | 暂停、恢复、停止或重启节点，见“每个节点的开关，以及谁管谁”；运行没在进行时写进日志，下次 `resume` 生效 |
+| `show --dir RUN [--at EVENT]` | 查看运行；持久化 SQLite 还可查看根图的历史位置。 |
+| `checkpoints --dir RUN` | 列出持久化 SQLite 的恢复位置。 |
+| `fork --dir RUN --to NEW --at EVENT` | 从稳定位置创建预览。可传 `--output` 修改指定版本的 JSON 输出，用 `--execute` 允许新运行继续执行。 |
 | `node-serve 模块:名字` | 把一个节点放在这个进程里服务，供别处的 `RemoteNode` 使用；`--listen 地址:端口`、`--token-env 变量名`、`--make`，见“在别的进程或别的机器上的节点” |
 
 命令所在的目录会加进模块搜索路径（和 `python -m` 一样），所以旁边的 `steps.py` 可以直接 `--allow steps`。输出被提前关掉时（`| head`）不算出错。
@@ -701,13 +704,14 @@ again = read("graph.json", Catalog(allow=["mypkg"]))         # again.digest == g
 
 `run` 和 `resume` 的退出码说明运行停在哪里：0 完成，1 失败或被拒绝，3 在等人回答，4 因为轮数或停止条件而停下。
 
-一次运行的全部内容都在它的目录里，所以可以由一个进程开始、另一个进程回答、第三个进程继续：
+默认的本地运行目录使用 JSONL。启动时选择 `run --journal sqlite` 可使用 SQLite 日志，再加 `--durable` 可启用持久化投递、历史查看和分叉。SQLite 的嵌套作用域存放在同一数据库内。多人审核、远程进度和工作进程接管见[协作服务说明](POSTGRES.md)。本地运行目录包含以下内容。
 
 ```
 graph.json      图的定义
 options.json    图能够到的范围、线程数、时间上限和预算
 inputs.json     开始运行时给的输入
 journal.jsonl   已经发生的事；块和运行中长出的图另有自己的日志，在 journal.jsonl.d/ 下，所在的激活完成后删除
+journal.sqlite3 选择 SQLite 时使用此文件代替 journal.jsonl
 questions/      图里的人被问到的问题，一个问题一个文件，名字是 <节点>-<轮次>
 answers/        已经给出的回答
 state.json      运行的状态：done、waiting、stopped、failed，以及检查发现的问题
@@ -739,6 +743,7 @@ lock            有进程正在运行这张图时存在，里面写着是哪个�
 | `check` | `graph` | 只建图不运行，返回摘要、节点、输入输出 |
 | `start` | `graph`、`inputs`、`wait` | 开始一次运行，返回运行的名字和状态。`wait: false` 时立即返回 `running`，运行在服务里继续 |
 | `status` | `run` | 运行的状态和待答的问题 |
+| `show` | `run`、可选 `timeline` | 查看已记录的依赖关系，可同时列出事件时间线。 |
 | `resume` | `run`、`wait` | 从日志接着跑，`wait` 同上 |
 | `stop` | `run` | 让正在进行的运行停下，之后可以再 `resume` |
 | `control` | `run`、`nodes`、`action`、`team` | 暂停、恢复、停止或重启其中的节点；运行正在进行时（在这个服务里或别的进程里）片刻之内生效 |
@@ -771,7 +776,7 @@ lock            有进程正在运行这张图时存在，里面写着是哪个�
 - 恢复是“至少一次”：被打断的节点会重跑。`ctx.once` 让图外做过的事不再重复，只有“做完”到“记下”之间的一瞬间例外，那一瞬间靠把 `ctx.key` 交给外部服务去重。
 - 流和调用还不经过传输接口；目前只有进程内的实现。远端节点（`RemoteNode`）只能发普通的值，不能接流或调用，也不能在远端调用图里的节点。
 - 设备节点只用假设备测试过。两种模型接口各对一个真实的兼容服务做过一次很小的验证（普通回答、流式、图里的工具调用、JSON 输出、密钥错误、命令行跑一条链），自动测试仍然只用脚本化的假模型；思考内容、图片输入、限流重试没有对真实服务验证过。
-- 运行目录的锁只在 `Run`、命令行和 MCP 服务这一层；直接用 `Engine` 和 `Journal` 时，同一个日志文件不能给两个引擎同时用。Windows 上不会自动接管死进程留下的锁。
+- 运行目录的锁只在 `Run`、命令行和 MCP 服务这一层；直接用 `Engine` 和 `Journal` 时，同一个日志文件不能给两个引擎同时用。在同一台 Windows 主机上，确认原进程已退出后也可以自动接管。
 - 测试在 Linux、macOS 和 Windows 上都跑。Windows 上外部程序输出的 `\r\n` 会换成 `\n`；控制台不是 UTF-8 时，命令行输出的 JSON 里非 ASCII 字符写成转义。
 - 预算在节点报告用量的那一刻检查，所以会超出一次调用的量；不报告用量的节点不受预算约束。
 - MCP 服务只有 stdio 一种传输。工具调用并行应答；客户端取消一次调用（`notifications/cancelled`）会停下那次调用等着的运行；客户端断开时，还在进行的运行被停在可以接着跑的地方。参考客户端（`mcp` 包）的 CI 测试和 MCP Inspector 图形界面都已跑通过。

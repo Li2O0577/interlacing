@@ -244,6 +244,7 @@ Every node in a run has a switch: on, paused or stopped. Nodes can be switched o
 |---|---|---|
 | `pause` | Does not start again | Finishes the current step and waits there, keeping its place and conversation |
 | `show` | `run`, `timeline` | Inspect recorded input deliveries and waits, optionally with a journal timeline |
+| `show` | `run`, optional `timeline` | Inspect recorded dependencies and optionally include the event timeline. |
 | `resume` | Starts as usual and handles the messages waiting for it | Continues from where it stopped |
 | `stop` | Does not start again; messages waiting for it are kept | Finishes the current step and ends this piece of work; the inputs it took are put back for later |
 | `restart` | Forgets what it remembers (`Node.reset`; for an agent, the conversation is cleared) and starts afresh | As before, and redoes the work with its original inputs |
@@ -457,7 +458,7 @@ Each part of `seq` and `par` can be a block or a function that builds a node fro
 
 The run inside a block belongs to the run outside:
 
-- When the outside has a journal, the inside run keeps its own journal next to it (`<journal>.d/<node>-<round>.jsonl`). After an interruption the block continues from where the inside stopped, and nodes that finished are not redone. Once the block's activation is in the outside journal, the inside journal is deleted.
+- With the default JSONL backend, the inside run keeps its own journal next to it (`<journal>.d/<node>-<round>.jsonl`). After an interruption the block continues from where the inside stopped, and nodes that finished are not redone. Once the block's activation is in the outside journal, the inside journal is deleted.
 - The watch port receives the inside events; `within` on an event says which block it is in, with one name per level of nesting.
 - Time limits apply to each node inside, not to the block as a whole.
 - Output problems found inside are recorded outside too, with the node named `block/node`.
@@ -681,7 +682,7 @@ A node of a method may be written as another method; it becomes a node holding t
 
 ## Command line and run directories
 
-Installing gives the command `interlacing` (or use `python -m interlacing.cli`). Every command prints JSON.
+Installing gives the command `interlacing` (or use `python -m interlacing.cli`). Most run commands print JSON.
 
 | Command | Purpose |
 |---|---|
@@ -693,6 +694,9 @@ Installing gives the command `interlacing` (or use `python -m interlacing.cli`).
 | `status --dir RUN` | Print the run's status and open questions |
 | `files --dir RUN` | List the files in the workspace, and which node wrote each one in which activation |
 | `control ACTION NODE... --dir RUN [--team]` | Pause, resume, stop or restart nodes, see "A switch on every node, and who manages whom"; when the run is not going on, it goes into the journal and takes effect at the next `resume` |
+| `show --dir RUN [--at EVENT]` | Inspect the run, or a historical root position with durable SQLite. |
+| `checkpoints --dir RUN` | List durable SQLite recovery positions. |
+| `fork --dir RUN --to NEW --at EVENT` | Preview a settled root position. Supply `--output` with a versioned JSON edit and `--execute` to allow the new run to resume. |
 | `node-serve module:name` | Serve one node in this process for a `RemoteNode` elsewhere; `--listen host:port`, `--token-env VAR`, `--make`, see "Nodes in another process or on another machine" |
 
 The directory the command is run in is put on the module search path (as `python -m` does), so a `steps.py` beside it can be named with `--allow steps`. Output closed early (`| head`) is not an error.
@@ -701,7 +705,7 @@ The directory the command is run in is put on the module search path (as `python
 
 The exit code of `run` and `resume` says where the run stopped: 0 finished, 1 failed or refused, 3 waiting for a human's answer, 4 stopped by rounds or a stop condition.
 
-Everything about a run is in its directory, so one process can start it, another can answer and a third can continue:
+The default local layout uses JSONL. Choose `run --journal sqlite` for a SQLite journal, and add `--durable` for committed delivery, historical inspection and forks. SQLite stores nested scopes in the same database. For shared approvals, remote progress and worker takeover, see the [PostgreSQL guide](POSTGRES.md). The local run directory contains:
 
 ```
 graph.json      the graph's definition
@@ -709,6 +713,7 @@ options.json    what the graph can reach, threads, time limit and budget
 inputs.json     the inputs given when the run started
 journal.jsonl   what has happened; blocks and graphs grown during the run have their own journals under
                 journal.jsonl.d/, deleted once their activation completes
+journal.sqlite3 alternative to journal.jsonl when SQLite is selected
 questions/      questions put to humans in the graph, one file each, named <node>-<round>
 answers/        answers already given
 state.json      the run's status: done, waiting, stopped or failed, plus problems found by checks
@@ -772,7 +777,7 @@ Tool calls are answered in parallel, so a long run does not block questions abou
 - Resuming is "at least once": an interrupted node is rerun. `ctx.once` keeps things done outside the graph from being repeated, except in the instant between "done" and "recorded", which is covered by handing `ctx.key` to the outside service for deduplication.
 - Streams and calls do not go through the transport interface yet; only the in-process implementation exists. Remote nodes (`RemoteNode`) can send only plain values, cannot take streams or calls, and cannot call nodes in the graph from the remote side.
 - Device nodes have been tested only with fake devices. Each of the two model APIs was checked once, very briefly, against a real compatible service (plain answers, streaming, tool calls in a graph, JSON output, a wrong key, running a chain from the command line); automated tests still use only scripted fake models, and thinking content, image input and rate-limit retries have not been checked against a real service.
-- The run directory lock exists only at the level of `Run`, the command line and the MCP server; when using `Engine` and `Journal` directly, one journal file must not be used by two engines at once. On Windows, locks left by dead processes are not taken over automatically.
+- The run directory lock exists only at the level of `Run`, the command line and the MCP server; when using `Engine` and `Journal` directly, one journal file must not be used by two engines at once. On the same host, a confirmed dead process can be taken over on Windows as well.
 - Tests run on Linux, macOS and Windows. On Windows, `\r\n` in external programs' output becomes `\n`; when the console is not UTF-8, non-ASCII characters in the command line's JSON output are escaped.
 - The budget is checked at the moment a node reports usage, so it can be exceeded by one call's worth; nodes that report no usage are not bound by it.
 - The MCP server has only the stdio transport. Tool calls are answered in parallel; a client cancelling a call (`notifications/cancelled`) stops the run that call was waiting on; when the client disconnects, runs still in progress are stopped at a point where they can continue. The reference client (the `mcp` package) exercises the server in CI. The MCP Inspector graphical client has also completed the cooling review.

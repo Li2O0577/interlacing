@@ -1,6 +1,6 @@
 # interlacing · Python 使用与维护手册
 
-**中文** · [English](HANDBOOK.en.md) · 适用版本 **0.16.2**，Python 3.11+。第一次使用，先做前两个例子；接手一个已有项目，直接查最后的维护地图。
+**中文** · [English](HANDBOOK.en.md) · 需要 Python 3.11+。第一个例子可用已发布的 **0.16.2** 运行。使用本手册中的持久化 SQLite、PostgreSQL 协作和新增 CLI 命令，请在本分支仓库根目录执行 `python -m pip install -e ".[postgres]"`（仅本地运行可用 `-e .`）。第一次使用，先做前两个例子；接手一个已有项目，直接查最后的维护地图。
 
 [快速开始](#start) · [建图与顺序](#graph) · [协议选择](#edges) · [节点选择](#nodes) · [组合与动态结构](#compose) · [运行与恢复](#run) · [质疑与更正](#review) · [JSON、CLI 与 MCP](#cli) · [维护与排错](#maintain)
 
@@ -217,6 +217,8 @@ PostgreSQL 协作服务支持项目成员、人工任务认领和多个工作进
 <a id="maintain"></a>
 
 ## 9 · 维护地图和排错
+
+**发布新版本。** 更新 `src/interlacing/__init__.py` 的 `__version__`，同步两版手册中测试会检查的 pip 安装示例，把变更日志的待发布内容归入新版本。每个版本使用新标签，名称为 `v` 加完整包版本。例如 Python 版本 `0.17.0b1` 对应标签 `v0.17.0b1`。标签指向通过验证的提交，测试版在 GitHub 勾选预发行。发布后工作流自动测试、构建并上传 PyPI。另行核对同一提交的 PostgreSQL CI 作业。旧标签和旧安装包可以继续使用。[发布工作流](../.github/workflows/release.yml) · [CI 工作流](../.github/workflows/ci.yml)
 
 改一个行为时，先找拥有这条规则的层，再找能观察到它的测试。
 
