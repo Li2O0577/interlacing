@@ -101,6 +101,7 @@ import inspect
 import secrets
 import threading
 import time
+from collections import deque
 from typing import Any, Callable, Iterable, Mapping
 
 from ..base import Change, Graph, GraphBuilder, GraphError, Invalid, Node, NodeError, Protocols, canonical, waited
@@ -109,11 +110,13 @@ from .aio import Signal, Threads, athrough, through, to_end
 from .checks import Checks
 from .clock import overrun, set_limits
 from .context import RunContext
-from .journal import JournalBackend
+from .durable import DurableState, copy_body, payload_key
+from .journal import JournalBackend, pack, pack_body, unpack_body
 from .ledger import Ledger, amounts
 from .recorder import Act, Recorder, restore, under
 from .result import OverBudget, Result, RunError
 from .scheduler import Scheduler
+from .sqlite import SQLiteJournal
 from .stream import Stream
 from .transport import Transport
 from .recorder import SWITCHED
@@ -155,7 +158,12 @@ class Engine:
         self._alive = 0                   # worker threads that have not returned
         self._outer = stopping
         self._carry = transport.carry if transport is not None else None
-        self._recorder = Recorder(journal) if journal is not None else None
+        self._durable = DurableState() if isinstance(journal, SQLiteJournal) and journal.durable else None
+        self._recorder = Recorder(journal, self._durable) if journal is not None else None
+        if self._durable is not None:
+            self._check_durable_graph(graph)
+            if transport is not None:
+                raise GraphError("durable SQLite journals do not support a custom transport")
         self._orphans: set[str] = set()   # after a resume: envelopes already dealt with whose sender must run again
         self._inside: dict[str, "Engine"] = {}   # node id -> the engine of the graph it runs inside itself now
         self._lock = Signal()
@@ -253,7 +261,8 @@ class Engine:
     def _feed(self, inputs: Mapping[str, Any] | None) -> None:
         """Start a new run: put the graph's inputs in and queue what can run."""
         recorder = self._recorder
-        if recorder is not None and recorder.read():
+        if recorder is not None and (recorder.journal.has_records() if isinstance(recorder.journal, SQLiteJournal)
+                                     else bool(recorder.read())):
             raise RunError("the journal already holds a run: resume it, or use a new journal")
         inputs = dict(inputs or {})
         unknown = inputs.keys() - self._inputs.keys()
@@ -266,7 +275,9 @@ class Engine:
                 feed = self._inputs[name]
                 try:
                     feed.port.port.schema.check(payload)
-                except ValueError as exc:
+                    if self._durable is not None:
+                        payload = copy_body(payload)
+                except (TypeError, ValueError) as exc:
                     raise RunError(f"graph input {name}: {exc}") from None
                 envelope = sched.envelope(feed, payload, 0, ())
                 sched.place(feed, envelope)
@@ -285,21 +296,66 @@ class Engine:
         that ``fresh`` asks to forget, is thrown away."""
         recorder = self._recorder
         if recorder is not None:
+            if self._durable is not None and not fresh:
+                assert isinstance(recorder.journal, SQLiteJournal)
+                return recorder.journal.has_records()
             records = recorder.read()
             if records:
+                if not fresh and records[0].get("durable"):
+                    raise RunError("this journal requires durable SQLite delivery")
                 if not fresh and under(records) == self.graph.digest:
                     return True
-                recorder.journal.reset()
+                if self._durable is not None:
+                    recorder.journal.discard()
+                else:
+                    recorder.journal.reset()
         return False
+
+    @staticmethod
+    def _check_durable_graph(graph: Graph) -> None:
+        unsupported = [edge.id for edge in graph.edges if edge.protocol not in ("value", "artifact") or edge.challenges]
+        if unsupported:
+            raise GraphError(f"durable SQLite journals require value or artifact edges without challenges: {', '.join(unsupported)}")
+
+    def _restore_durable(self, recorder: Recorder, change: bool) -> bool:
+        if change:
+            raise RunError("resume the original durable graph before changing it through ctx.change")
+        assert isinstance(recorder.journal, SQLiteJournal)
+        checkpoint, records = recorder.journal.recovery()
+        restored = DurableState(checkpoint)
+        for record in records:
+            restored.apply(record)
+        start = restored.data["run"]
+        if start is None:
+            raise RunError("the journal is empty: there is nothing to resume")
+        if start["graph"] != self.graph.digest:
+            raise RunError("the journal was written under another durable graph")
+        if self._id is not None and start["id"] != self._id:
+            raise RunError("the durable child journal belongs to another activation")
+        with self._lock:
+            self._durable = recorder.durable = restored
+            self._id = start["id"]
+            restored.rebuild(self, SWITCHED)
+            if not restored.data["ended"]:
+                over = self._ledger.over()
+                if over:
+                    raise RunError(f"{over}: it goes on only under a larger budget")
+                for state in self._states.values():
+                    self._sched.consider(state)
+        return bool(restored.data["ended"])
 
     def _restore(self, change: bool) -> bool:
         """Put the run in the journal back as it was. Returns whether that run had already ended."""
         recorder = self._recorder
         if recorder is None:
             raise RunError("resume needs a journal")
+        if self._durable is not None:
+            return self._restore_durable(recorder, change)
         records = recorder.read()
         if not records:
             raise RunError("the journal is empty: there is nothing to resume")
+        if records[0].get("durable"):
+            raise RunError("this journal requires durable SQLite delivery")
         was = under(records)
         assert was is not None
         changed = was != self.graph.digest
@@ -347,6 +403,8 @@ class Engine:
     def _control(self, nodes: str | Iterable[str], action: str, team: bool, by: str | None) -> list[str]:
         if action not in SWITCHED:
             raise ValueError(f"no action {action!r}: one of {', '.join(SWITCHED)}")
+        if self._durable is not None and action == "restart":
+            raise NodeError("durable activations support pause, stop and resume")
         ids = [nodes] if isinstance(nodes, str) else list(nodes)
         inside = [id for id in ids if "/" in id]
         if inside:
@@ -370,9 +428,19 @@ class Engine:
                     raise NodeError(f"{by} does not manage {', '.join(outside)}")
             if team:
                 ids = [*ids, *(member for id in ids for member in graph.team(id))]
-            changed = [id for id in dict.fromkeys(ids) if self._switch(self._states[id], action)]
-            if changed and self._recorder is not None:
-                self._recorder.control(changed, action, by)
+            if self._durable is not None:
+                changed = [id for id in dict.fromkeys(ids) if
+                           (self._states[id].status == ACTIVE if action == "pause"
+                            else self._states[id].status != SWITCHED[action])]
+                if changed:
+                    self._write_durable(self._states[changed[0]], {"kind": "control", "nodes": changed,
+                                        "action": action, **({"by": by} if by else {})})
+                    for id in changed:
+                        self._switch(self._states[id], action)
+            else:
+                changed = [id for id in dict.fromkeys(ids) if self._switch(self._states[id], action)]
+                if changed and self._recorder is not None:
+                    self._recorder.control(changed, action, by)
             lock.notify_all()
         if changed and self._observe is not None:
             self._tell("control", nodes=changed, action=action, **({"by": by} if by else {}))
@@ -502,6 +570,8 @@ class Engine:
                 raise NodeError(f"{node.id} can save progress only in an activation of its own")
             if ctx._cut or self._over:
                 return False
+            if state.replay:
+                raise NodeError("durable replay still has committed operations to reproduce")
             ctx._saved = True
             if act is None or self._recorder is None:
                 state.holding = []
@@ -510,6 +580,8 @@ class Engine:
             try:
                 self._recorder.act(act, open=True, children=state.inner.values())
             except Exception as exc:   # noqa: BLE001 - something it sent or holds is not plain data
+                if self._durable is not None:
+                    self._abort_durable(state, exc)
                 raise NodeError(f"its progress cannot be journaled: {exc}") from None
             ctx._act = Act(node.id, act.round, ())
             state.holding = []          # what it took so far is used up for good: a cut no longer gives it back
@@ -585,6 +657,8 @@ class Engine:
 
     def _receive(self, state: State, ctx: RunContext, ports, timeout: float | None) -> dict | None:
         """``ctx.receive``: wait for the next message to this running activation (see ``Context.receive``)."""
+        if self._durable is not None:
+            raise NodeError("durable delivery binds inputs at activation start")
         ports = self._ports(state, ports)
         until = None if timeout is None else time.monotonic() + timeout
         lock = self._lock
@@ -606,6 +680,8 @@ class Engine:
 
     async def _areceive(self, state: State, ctx: RunContext, ports, timeout: float | None) -> dict | None:
         """``_receive``, awaited: the coroutine waits without holding the loop."""
+        if self._durable is not None:
+            raise NodeError("durable delivery binds inputs at activation start")
         ports = self._ports(state, ports)
         until = None if timeout is None else time.monotonic() + timeout
         lock = self._lock
@@ -907,7 +983,7 @@ class Engine:
         """Nodes whose switch is off and that still have something waiting for them."""
         held = {}
         for id, state in self._states.items():
-            if state.status != ACTIVE and (state.running or any(
+            if state.status != ACTIVE and (state.running or state.bound or any(
                     feed.box for port in state.ports.values() for feed in (*port.forward, *port.back))):
                 held[id] = state.status
         return held
@@ -964,6 +1040,8 @@ class Engine:
         if recorder is not None:
             if not ended and not self._sched.stopped and self._error is None and not self._unfinished():
                 recorder.end()
+            if not ended:
+                recorder.checkpoint()
             recorder.close()
 
     def _conclude(self) -> Result:
@@ -1182,17 +1260,38 @@ class Engine:
         could not be read: it has failed."""
         sched, checks = self._sched, self._checks
         state = sched.ready.popleft()
+        pending = self._durable.pending.get(state.node.id) if self._durable is not None else None
+        if pending is not None:
+            state.round = pending["round"] - 1
         state.begin()
         if self._timed:
             state.since = time.monotonic()
             self._lock.notify_all()          # the watcher must learn that a clock has started
         self._active += 1
         try:
-            taken, cause, took = sched.take(state, lambda feed, body: checks.arrived(state, feed, body))
+            bound: list[Feed] | None = None
+            if pending is not None:
+                state.resuming, state.resumed = False, pending["resumed"]
+                state.replay = deque(pending["ops"])
+                bound = []
+                for id in pending["took"]:
+                    feed = self._feeds[id.rsplit("#", 1)[0]]
+                    if not feed.box or feed.box[0].id != id or feed.port.state is not state:
+                        raise NodeError(f"cannot recover bound input {id!r}")
+                    bound.append(feed)
+            def read(feed, body):
+                return checks.arrived(state, feed, copy_body(body) if self._durable is not None else body)
+
+            taken, cause, took = sched.take(state, read, bound=bound)
+            if self._durable is not None and pending is None:
+                assert self._recorder is not None
+                self._recorder.write({"kind": "bind", "node": state.node.id, "round": state.round, "took": list(took)})
+                state.bound = True
         except Exception as exc:   # noqa: BLE001 - a protocol's decode failed
             self._fail(state, exc)
             return None
-        self._result.activations += 1
+        if pending is None:
+            self._result.activations += 1
         return state, taken, cause, took
 
     def _started(self, state: State, cause: tuple, took: tuple) -> tuple[RunContext, Act | None]:
@@ -1280,6 +1379,8 @@ class Engine:
         when the engine has already returned and what the activation did is thrown away."""
         lock, sched, node = self._lock, self._sched, state.node
         act = ctx._act                  # the record it is writing now: a new one after each commit
+        if failure is None and self._durable is not None and self._error is not None and self._error.node == node.id:
+            failure = self._error
         if state.reviews.open:                  # rejections it took up and did not answer: Node.challenged answers them
             with lock:
                 state.reviews.defer_open()
@@ -1348,11 +1449,14 @@ class Engine:
             if act is not None:
                 assert self._recorder is not None
                 try:
+                    if state.replay:
+                        raise NodeError("durable replay ended before reproducing committed operations")
                     reading = state.reading
                     if (state.node.on_correction != "rerun" or state.passive or ctx._saved or reading is None
                             or tuple(reading.at) != act.took or state.streams):
                         reading = None
                     self._recorder.act(act, reading=reading, children=state.inner.values())
+                    state.bound = False
                 except Exception as exc:   # noqa: BLE001 - something it sent is not plain data
                     self._fail(state, RunError(f"cannot be journaled: {exc}"))
                     return True
@@ -1426,6 +1530,8 @@ class Engine:
     # ---- what a node asks of the run through ctx ---------------------------------------------------------
 
     def _emit(self, state: State, port: str, payload: Any, round: int, cause: tuple, act: Act | None = None) -> str:
+        if self._durable is not None:
+            return self._committed_emit(state, port, payload, round, cause, act)
         if state.redoing and state.redoing.get(port):     # run again: it corrects what it sent the first time
             name = state.redoing[port].popleft()
             if name in state.sent_log:
@@ -1488,6 +1594,78 @@ class Engine:
             self._wake()
         return token
 
+    def _write_durable(self, state: State, record: dict) -> None:
+        """Append an operation while holding the engine lock, before exposing its effect."""
+        assert self._recorder is not None
+        try:
+            self._recorder.write(record)
+        except (OSError, TypeError, ValueError) as error:
+            self._abort_durable(state, error)
+            raise NodeError(f"cannot commit durable operation: {error}") from error
+
+    def _abort_durable(self, state: State, error: Exception) -> None:
+        if self._error is None:
+            self._error = RunError(f"cannot commit durable operation: {error}", state.node.id)
+        self._sched.stopped = True
+        self._lock.notify_all()
+
+    @staticmethod
+    def _replayed(state: State, operation: dict) -> dict | None:
+        if not state.replay:
+            return None
+        expected = state.replay[0]
+        if any(canonical(expected.get(key)) != canonical(value) for key, value in operation.items()):
+            raise NodeError(f"durable replay of {state.node.id} diverged at {operation['kind']}")
+        return state.replay.popleft()
+
+    def _committed_emit(self, state: State, port: str, payload: Any, round: int, cause: tuple, act: Act | None) -> str:
+        if act is None:
+            raise NodeError("durable delivery requires an active journaled node")
+        try:
+            feeds, names = state.outs[port]
+        except KeyError:
+            raise NodeError(f"{state.node.id} has no output port {port!r}") from None
+        if port in state.calls:
+            raise NodeError(f"{state.node.id}.{port} makes a call: use ctx.call, not emit")
+        key = payload_key(payload)
+        with self._lock:
+            if self._over or self._sched.stopped:
+                raise NodeError("the run is stopping")
+            replayed = self._replayed(state, {"kind": "deliver", "port": port, "key": key})
+            if replayed is not None:
+                state.delivered = True
+                return str(replayed["token"])
+        bodies = self._bodies(state, port, payload, feeds, round, act)
+        with self._lock:
+            if self._over or self._sched.stopped:
+                raise NodeError("the run is stopping")
+            count = state.emitted.get(port, 0) + 1
+            token = f"{port}#{count}"
+            outputs = [[name, len(self._result.outputs[name]), pack_body(copy_body(payload))] for name in names]
+            limited: list[str] = []
+            deliveries: list[tuple[Feed, Envelope]] = []
+            for (feed, _), body in zip(feeds, bodies):
+                if feed.gone:
+                    continue
+                if feed.limit is not None and feed.sent >= feed.limit:
+                    limited.append(feed.id)
+                else:
+                    deliveries.append((feed, self._sched.envelope(feed, copy_body(body), round, cause)))
+            self._write_durable(state, {"kind": "deliver", "node": state.node.id, "round": round,
+                                        "port": port, "key": key, "token": token, "outputs": outputs,
+                                        "limited": limited, "sent": [pack(envelope) for _, envelope in deliveries]})
+            state.delivered = True
+            state.emitted[port] = count
+            self._limited.update(dict.fromkeys(limited))
+            for name, _, body in outputs:
+                self._result.outputs[name].append(unpack_body(body))
+            if self._observe is not None:
+                self._tell("emitted", node=state.node.id, round=round, port=port, payload=payload)
+            for feed, envelope in deliveries:
+                self._sched.place(feed, envelope)
+            self._wake()
+        return token
+
     def _bodies(self, state: State, port: str, payload: Any, feeds, round: int, act: Act | None) -> list:
         """What ``payload`` becomes on each of ``feeds``, once it has passed the checks."""
         try:
@@ -1531,6 +1709,8 @@ class Engine:
         """``ctx.correct``: ``payload`` takes the place of message ``name`` this node sent (see
         ``Context.correct``). Where it waits unread it is replaced; where it was read, the receiver's
         ``on_correction`` says what follows; a graph output it reached is changed."""
+        if self._durable is not None:
+            raise NodeError("message correction requires the standard journal mode")
         node = state.node
         sent = state.sent_log.get(name)
         if sent is None:
@@ -1804,8 +1984,18 @@ class Engine:
                 raise NodeError("the run is stopping")
             self._ending(state, change)
             before = {node.id for node in self.graph.nodes}
-            dropped = self._make(change, state.node.id)
-            if act is not None:
+            if self._durable is not None:
+                if act is None or described is None or any(
+                        op[0] not in ("add", "connect", "ports", "output", "manage") for op in described):
+                    raise GraphError("durable graph edits must add nodes, edges, ports, outputs or management")
+                operation = {"kind": "topology", "operations": described}
+                if self._replayed(state, operation) is not None:
+                    return
+                dropped = self._make(change, state.node.id, before_apply=lambda: self._write_durable(
+                    state, {**operation, "node": state.node.id, "round": state.round}))
+            else:
+                dropped = self._make(change, state.node.id)
+            if act is not None and self._durable is None:
                 act.changes.append(described)
             if self._sched.ready:
                 self._lock.notify_all()
@@ -1855,7 +2045,8 @@ class Engine:
         """Make again, while the run is being taken up, a change the journal holds."""
         return self._make(Change.of(described, self._remade), None, consider=False)
 
-    def _make(self, change: Change, caller: str | None, consider: bool = True) -> int:
+    def _make(self, change: Change, caller: str | None, consider: bool = True,
+              before_apply: Callable[[], None] | None = None) -> int:
         """Apply ``change`` to the graph and to what the run keeps of it. Called under the lock. Returns how
         many waiting envelopes were dropped with the edges taken out. While a run is being taken up nothing
         is queued yet (``consider=False``): that is done once the whole journal has been read."""
@@ -1872,6 +2063,12 @@ class Engine:
             for id in gone:
                 if self._states[id].running:
                     raise GraphError(f"{id} is running and cannot be taken out now")
+            if self._durable is not None:
+                self._check_durable_graph(new)
+                if any(new.outputs.get(name) != endpoint for name, endpoint in old.outputs.items()):
+                    raise GraphError("durable graph edits may only add output names")
+            if before_apply is not None:
+                before_apply()
         except Exception:
             change.undo()                       # ports it gave to a node stay with the graph that was refused
             raise

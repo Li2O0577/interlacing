@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .base import GraphError
 from .engine import Engine, Journal, RunError, SQLiteJournal
 from .nodes import Workspace
 from .models import ChatResult, FakeProvider, ProviderError, build
@@ -212,7 +213,7 @@ class Run:
                models: Callable[[str], Any] | None = models_from_environment, files=None,
                time_limit: float | None = None, observe: Callable[[Mapping], None] | None = None,
                workspace=None, budget: Mapping[str, float] | None = None, strict: bool = False, tools=None,
-               apps=None, remotes=(), journal: str = "jsonl") -> "Run":
+               apps=None, remotes=(), journal: str = "jsonl", durable: bool = False) -> "Run":
         """Check the description and set up a directory for one run of it. Nothing runs yet. ``files`` is
         the directory the description may take text from; the text is kept in the run, the files are not
         needed again. ``time_limit`` is the longest one activation may take, in seconds. ``workspace`` is the
@@ -222,12 +223,15 @@ class Run:
         in it may give itself more time than ``time_limit``, and no block more threads than ``workers``.
         ``tools`` is a tool pool: the directory the graph's agents may take tool files from. ``apps`` is the
         directory whose folders may be nodes, and ``remotes`` the addresses
-        of served nodes the graph may reach. ``journal`` selects JSONL or SQLite for this run's history."""
+        of served nodes the graph may reach. ``journal`` selects JSONL or SQLite. ``durable`` enables
+        SQLite delivery commits and recovery checkpoints."""
         run = cls(directory, models=models, observe=observe)
         if time_limit is not None and not time_limit > 0:
             raise SpecError("the time limit must be a positive number of seconds")
         if journal not in JOURNALS:
             raise SpecError(f"unknown journal backend {journal!r}: choose jsonl or sqlite")
+        if durable and journal != "sqlite":
+            raise SpecError("durable delivery requires the SQLite journal")
         options = {"allow": list(allow), "processes": bool(processes), "workers": int(workers), "time_limit": time_limit,
                    "budget": _budget(budget), "strict": bool(strict),
                    "workspace": str(Path(workspace).resolve()) if workspace is not None else None,
@@ -235,12 +239,19 @@ class Run:
                    "apps": str(Path(apps).resolve()) if apps is not None else None, "remotes": list(remotes)}
         if journal != "jsonl":
             options["journal"] = journal
+        if durable:
+            options["durable"] = True
         run.directory.mkdir(parents=True, exist_ok=True)
         with _Lock(run.directory):
             if (run.directory / "graph.json").exists():
                 raise SpecError(f"{run.directory} already holds a run")
             run.workspace(options).mkdir(parents=True, exist_ok=True)
             graph = load(description, run._catalog(options, files))
+            if durable:
+                try:
+                    Engine._check_durable_graph(graph)
+                except GraphError as exc:
+                    raise SpecError(str(exc)) from exc
             saved_graph = dump(graph)
             _write(run.directory / "options.json", options)
             run._state(NEW, graph=graph.digest)
@@ -270,7 +281,7 @@ class Run:
         if backend == "jsonl":
             return Journal(self.directory / "journal.jsonl")
         if backend == "sqlite":
-            return SQLiteJournal(self.directory / "journal.sqlite3")
+            return SQLiteJournal(self.directory / "journal.sqlite3", durable=bool(options.get("durable")))
         raise SpecError(f"unknown journal backend {backend!r} in {self.directory}")
 
     def _engine(self) -> Engine:
@@ -306,7 +317,8 @@ class Run:
             journal = self._journal()
             if not journal.path.exists():
                 raise SpecError(f"{self.directory} has not been started")
-            if not journal.read():                  # the process died before the first record was whole
+            has_records = journal.has_records() if isinstance(journal, SQLiteJournal) else bool(journal.read())
+            if not has_records:                     # the process died before the first record was whole
                 return self._go(lambda engine: engine.run(_read(self.directory / "inputs.json", {})), budget)
             return self._go(lambda engine: engine.resume(), budget)
 
@@ -363,6 +375,8 @@ class Run:
             raise SpecError(f"no action {action!r}: one of {', '.join(SWITCHED)}")
         graph = self._engine().graph
         journal = self._journal()
+        if isinstance(journal, SQLiteJournal) and journal.durable and action == "restart":
+            raise SpecError("durable activations support pause, stop and resume")
         known = {node.id for node in graph.nodes}
         known |= {r["node"] for r in journal.inspect() if r["kind"] == "act"}
         ids = [nodes] if isinstance(nodes, str) else list(nodes)

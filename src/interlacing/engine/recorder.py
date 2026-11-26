@@ -7,16 +7,21 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Iterable
+import json
 import secrets
 import time
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from ..base import Envelope, Protocol
 from .journal import JournalBackend, history_record, pack, pack_body, unpack_body
 from .ledger import Ledger
 from .result import Result
 from .scheduler import Scheduler
+from .sqlite import SQLiteJournal
 from .wiring import ACTIVE, PAUSED, STOPPED, Reading, Sent, Wiring, bounded
+
+if TYPE_CHECKING:
+    from .durable import DurableState
 
 
 class Act:
@@ -46,20 +51,28 @@ class Act:
 class Recorder:
     """Writes one run's records to its journal."""
 
-    __slots__ = ("journal",)
+    __slots__ = ("journal", "durable")
 
-    def __init__(self, journal: JournalBackend):
+    def __init__(self, journal: JournalBackend, durable: DurableState | None = None):
         self.journal = journal
+        self.durable = durable
 
     def read(self) -> list[dict]:
         return self.journal.read()
 
-    def _write(self, record: dict) -> None:
+    def write(self, record: dict) -> None:
+        if self.durable is not None:
+            record = json.loads(json.dumps(record, allow_nan=False))
         self.journal.write({"schema_version": 1, **record})
+        if self.durable is not None:
+            self.durable.apply(record)
+            assert isinstance(self.journal, SQLiteJournal)
+            if self.durable.seq % self.journal.checkpoint_every == 0:
+                self.journal.checkpoint(self.durable.data)
 
     def run(self, id: str, graph: str, sent: list[Envelope]) -> None:
-        self._write({"kind": "run", "id": id, "scope_id": secrets.token_hex(16), "graph": graph,
-                     "sent": [pack(e) for e in sent]})
+        self.write({"kind": "run", "id": id, "scope_id": secrets.token_hex(16), "graph": graph,
+                    "sent": [pack(e) for e in sent], **({"durable": True} if self.durable is not None else {})})
 
     def act(self, act: Act, open: bool = False, reading: Reading | None = None,
             children: Iterable[JournalBackend] = ()) -> None:
@@ -67,10 +80,10 @@ class Recorder:
         child_history = []
         for child in children:
             events = [history_record(record, seq) for seq, record in enumerate(child.read(), 1)
-                      if record["kind"] in ("run", "act")]
+                      if record["kind"] in ("run", "act", "deliver")]
             if events:
                 child_history.append(events)
-        self._write({"kind": "act", "node": act.node, "round": act.round, "took": list(act.took),
+        self.write({"kind": "act", "node": act.node, "round": act.round, "took": list(act.took),
                      "elapsed_seconds": time.monotonic() - act.started,
                      **({"rerun_outputs": reading.emits} if reading is not None else {}),
                      "sent": [pack(e) for e in act.sent],
@@ -89,27 +102,33 @@ class Recorder:
                      **({"open": True} if open else {})})
 
     def use(self, node: str, round: int, amounts: Mapping[str, float]) -> None:
-        self._write({"kind": "use", "node": node, "round": round, "amounts": dict(amounts)})
+        self.write({"kind": "use", "node": node, "round": round, "amounts": dict(amounts)})
 
     def once(self, node: str, round: int, name: str, value: Any) -> None:
-        self._write({"kind": "once", "node": node, "round": round, "name": name, "value": value})
+        self.write({"kind": "once", "node": node, "round": round, "name": name, "value": value})
 
     def control(self, nodes: list[str], action: str, by: str | None = None) -> None:
-        self._write({"kind": "control", "nodes": nodes, "action": action, **({"by": by} if by else {})})
+        self.write({"kind": "control", "nodes": nodes, "action": action, **({"by": by} if by else {})})
 
     def review(self, kind, rejection) -> None:
-        self._write({"kind": kind, "id": rejection.id, "node": rejection.by, "edge": rejection.feed.id,
+        self.write({"kind": kind, "id": rejection.id, "node": rejection.by, "edge": rejection.feed.id,
                      **({"answer": rejection.answer} if rejection.answer else {"reason": rejection.reason})})
 
     def change(self, under: str, graph: str, dropped: int) -> None:
-        self._write({"kind": "change", "from": under, "graph": graph, "dropped": dropped})
+        self.write({"kind": "change", "from": under, "graph": graph, "dropped": dropped})
 
     def end(self) -> None:
-        self._write({"kind": "end"})
+        self.write({"kind": "end"})
         self.journal.prune_empty_inner()
 
     def close(self) -> None:
         self.journal.close()
+
+    def checkpoint(self) -> None:
+        if self.durable is not None and self.durable.seq:
+            assert isinstance(self.journal, SQLiteJournal)
+            if self.durable.seq % self.journal.checkpoint_every:
+                self.journal.checkpoint(self.durable.data)
 
     def inner(self, node: str, round: int) -> JournalBackend:
         """The journal of a run made inside activation ``round`` of ``node``."""

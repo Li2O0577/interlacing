@@ -139,15 +139,20 @@ def explain_records(graph: dict, records: Iterable[dict], status: str, questions
             if record.get("fixed_out"):
                 event["revised_outputs"] = [{"output": name, "index": index}
                                             for name, index, _ in record["fixed_out"]]
-            if record.get("changes"):
+            if kind == "bind":
+                event["took"] = record["took"]
+            if kind == "topology":
+                event["operations"] = [op[0] for op in record["operations"]]
+            elif record.get("changes"):
                 event["operations"] = [op[0] for ops in record["changes"] for op in ops]
             events.append(event)
-        for ops in record.get("changes", ()):
+        changes = (record["operations"],) if kind == "topology" else record.get("changes", ())
+        for ops in changes:
             if unknown:
                 break
             _apply(ops, descriptions, edges, inputs_map, outputs, sent, activated, managers)
             changed = True
-        if kind in ("run", "act"):
+        if kind in ("run", "act", "deliver"):
             sent.update(envelope[0] for envelope in record.get("sent", ()))
         if kind == "act":
             activated.add(record["node"])

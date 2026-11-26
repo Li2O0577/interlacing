@@ -100,11 +100,14 @@ class Refused(Exception):
 class Server:
     def __init__(self, runs, *, allow=(), processes: bool = False, workers: int = 0,
                  models: Callable[[str], Any] | None = models_from_environment, time_limit: float | None = None, files=None,
-                 budget: Mapping[str, float] | None = None, tools=None, apps=None, remotes=(), journal: str = "jsonl"):
+                 budget: Mapping[str, float] | None = None, tools=None, apps=None, remotes=(), journal: str = "jsonl",
+                 durable: bool = False):
+        if durable and journal != "sqlite":
+            raise SpecError("durable delivery requires the SQLite journal")
         self.root, self.budget, self.tools, self.apps = Path(runs), dict(budget or {}), tools, apps
         self.remotes = list(remotes)
         self.time_limit, self.files = time_limit, files
-        self.journal = journal
+        self.journal, self.durable = journal, durable
         self.allow, self.processes, self.workers, self.models = list(allow), bool(processes), int(workers), models
         self._lock = threading.Lock()
         self._going: dict[str, Run] = {}            # the runs this server is running now, by id
@@ -175,7 +178,7 @@ class Server:
         run = Run.create(self.root / id, self._graph(arguments), allow=self.allow, processes=self.processes,
                          workers=self.workers, models=self.models, time_limit=self.time_limit, files=self.files,
                          budget=self.budget, strict=True, tools=self.tools, apps=self.apps,
-                         remotes=self.remotes, journal=self.journal)
+                         remotes=self.remotes, journal=self.journal, durable=self.durable)
         return self._carry(id, run, lambda: run.start(inputs), arguments.get("wait"))
 
     def status(self, arguments: Mapping) -> dict:

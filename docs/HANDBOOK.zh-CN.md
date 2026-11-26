@@ -179,6 +179,10 @@ interlacing resume --dir demo-run
 
 新建运行时可加 `--journal sqlite`，将执行历史写入 `journal.sqlite3`。运行目录记录后端选择，之后的 `resume`、`show`、`status` 和 `control` 自动沿用。已有运行默认使用 JSONL。图定义、人工问题和回复、工作区文件都保存在运行目录。Python 入口可用 `Run.create(..., journal="sqlite")`，也可将 `SQLiteJournal(path)` 传给 `Engine`。
 
+在 `run` 或 `serve` 上同时使用 `--journal sqlite --durable`，让消息提交后才唤醒接收节点。节点代码执行前，运行时会记录它实际绑定的输入。恢复先加载周期检查点，再处理之后的事件。未完成的节点按原输入重放，输出匹配时复用已提交的投递。重放结果或改图操作不一致时，系统会报错。节点可通过 `ctx.commit()`、`snapshot/restore` 和 `ctx.resumed` 恢复显式进度。Python 入口可用 `SQLiteJournal(path, durable=True)`。
+
+该模式支持普通值与内容引用、启动时绑定输入、追加式改图，以及暂停、停止与继续。流、调用、质疑、消息修正、运行中接收、节点重启和替换图恢复使用标准模式。持久化投递为图内消息去重，未完成节点的代码仍可能重试。外部服务支持幂等键时，应为写操作使用稳定的键。
+
 用 `interlacing show --dir demo-run` 可以按输入端口查看已记录的投递。等待审批时，`publish.note` 已收到来自 `draft.note` 的投递，`publish.verdict` 还在等 `editor.answer` 的首次投递记录。命令仅读取保存的图和完整日志行，无需加载节点代码。正在运行时展示的也是已落盘的证据。图中的增删节点与接线会根据已提交的变更重建。
 
 加 `--timeline` 按日志顺序看激活轮次、质疑与答复、节点开关和上报用量。新日志的 `elapsed_seconds` 是本次激活记录片段的墙钟耗时（包括等待）；旧记录没有耗时字段。失败运行另有 `failure`。用 `--format mermaid` 或 `--format dot` 导出节点与端口连线。若外部替换图只留下摘要，输出会标明最后已知拓扑。[模拟结果的两种审查路径](../examples/graphs/simulation_review.py)

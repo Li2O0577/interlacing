@@ -30,7 +30,7 @@ class Scheduler:
         """Queue the node if it can be activated now."""
         if state.running or state.queued or self.stopped or state.called or state.status != ACTIVE:
             return
-        if state.resuming:
+        if state.resuming or state.bound:
             can = True                       # it goes on from the progress it saved, with or without new messages
         elif state.reviews.pending:
             can = True                       # what it sent was rejected: it is to answer
@@ -129,7 +129,7 @@ class Scheduler:
                 state.arrivals.appendleft(feed)
         state.holding = []
 
-    def take(self, state: State, read: Read) -> tuple[dict, tuple, tuple]:
+    def take(self, state: State, read: Read, bound: list[Feed] | None = None) -> tuple[dict, tuple, tuple]:
         """The inputs of one activation, the ids of the envelopes they came in, and which of those were used up."""
         inputs: dict[str, Any] = {}
         cause: list[str] = []
@@ -158,7 +158,17 @@ class Scheduler:
             holding.append((feed, envelope))
             return read(feed, envelope.body)
 
-        if state.any:
+        if bound is not None:
+            for feed in bound:
+                if state.any:
+                    state.arrivals.remove(feed)
+                port = feed.port.port
+                value = pop(feed)
+                if port.many:
+                    inputs.setdefault(port.name, []).append(value)
+                else:
+                    inputs[port.name] = value
+        elif state.any:
             while state.arrivals:
                 feed = state.arrivals.popleft()
                 if feed.box:    # a latest feed may have been overwritten and already read

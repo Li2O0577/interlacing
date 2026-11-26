@@ -166,7 +166,7 @@ class State:
                  "opened", "round", "outs", "calls", "passive", "streams", "called", "since", "time_limit", "rejected", "delivered",
                  "inner", "status", "halt", "holding", "paused_at", "waiting", "late", "resuming", "resumed", "opening",
                  "emitted", "sent_log", "read_log", "redo", "reading", "redoing", "replaced",
-                 "reviews", "took_on", "failures", "failures_shown")
+                 "reviews", "took_on", "failures", "failures_shown", "bound", "replay")
 
     def __init__(self, node: Node):
         self.node = node
@@ -207,6 +207,8 @@ class State:
         self.took_on: dict[str, list] = {}        # this activation: port -> [(feed, envelope), ...] it took there
         self.failures: list = []                  # failures of nodes it manages, come to it and not taken up
         self.failures_shown = 0                   # how many of those its running activation has been woken for
+        self.bound = False                        # a durable activation can continue without new inputs
+        self.replay: deque[dict] = deque()
 
     def begin(self) -> None:
         """A new activation starts: forget what the last one did."""

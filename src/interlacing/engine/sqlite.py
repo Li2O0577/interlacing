@@ -13,8 +13,12 @@ from .journal import JournalError
 class SQLiteJournal:
     """Keep journals in one local SQLite file, with a separate sequence per scope."""
 
-    def __init__(self, path: str | Path, *, scope: tuple[tuple[str, int], ...] = ()):
+    def __init__(self, path: str | Path, *, durable: bool = False, checkpoint_every: int = 64,
+                 scope: tuple[tuple[str, int], ...] = ()):
+        if type(checkpoint_every) is not int or checkpoint_every < 1:
+            raise ValueError("checkpoint_every must be a positive integer")
         self.path = Path(path)
+        self.durable, self.checkpoint_every = durable, checkpoint_every
         self._scope = scope
         self._keys = tuple(json.dumps(scope[:depth], separators=(",", ":"))
                            for depth in range(len(scope) + 1))
@@ -32,7 +36,7 @@ class SQLiteJournal:
 
     def _version(self, connection: sqlite3.Connection) -> int:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in (0, 1):
+        if version not in (0, 1, 2):
             raise JournalError(f"{self.path}: unsupported SQLite journal version {version}")
         return version
 
@@ -48,7 +52,8 @@ class SQLiteJournal:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("BEGIN IMMEDIATE")
             with connection:
-                if self._version(connection) == 0:
+                version = self._version(connection)
+                if version == 0:
                     connection.execute(
                         "CREATE TABLE runs (scope TEXT PRIMARY KEY, parent TEXT REFERENCES runs(scope) ON DELETE CASCADE)"
                     )
@@ -58,6 +63,12 @@ class SQLiteJournal:
                         "seq INTEGER NOT NULL, record TEXT NOT NULL, PRIMARY KEY (scope, seq))"
                     )
                     connection.execute("PRAGMA user_version = 1")
+                if version < 2 and self.durable:
+                    connection.execute(
+                        "CREATE TABLE checkpoints (scope TEXT PRIMARY KEY REFERENCES runs(scope) ON DELETE CASCADE, "
+                        "seq INTEGER NOT NULL, state TEXT NOT NULL)"
+                    )
+                    connection.execute("PRAGMA user_version = 2")
                 yield connection
 
     def inspect(self) -> Iterator[dict]:
@@ -77,6 +88,45 @@ class SQLiteJournal:
     def read(self) -> list[dict]:
         return list(self.inspect())
 
+    def has_records(self) -> bool:
+        if not self.path.exists():
+            return False
+        with self._connection() as connection:
+            if not self._version(connection):
+                return False
+            return connection.execute("SELECT 1 FROM run_events WHERE scope = ? LIMIT 1", (self._key,)).fetchone() is not None
+
+    def recovery(self) -> tuple[dict | None, list[dict]]:
+        """Read the latest recovery state and later events from one SQLite snapshot."""
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            version = self._version(connection)
+            if not version:
+                return None, []
+            row = None
+            if version >= 2:
+                row = connection.execute("SELECT seq, state FROM checkpoints WHERE scope = ?", (self._key,)).fetchone()
+            seq, state = row if row is not None else (0, None)
+            records = connection.execute("SELECT record FROM run_events WHERE scope = ? AND seq > ? ORDER BY seq",
+                                         (self._key, seq))
+            try:
+                checkpoint = json.loads(state) if state is not None else None
+                if checkpoint is not None and checkpoint.get("seq") != seq:
+                    raise ValueError("checkpoint position does not match its state")
+                return checkpoint, [json.loads(record) for record, in records]
+            except (AttributeError, ValueError) as error:
+                raise JournalError(f"{self.path}: invalid recovery data: {error}") from error
+
+    def checkpoint(self, state: dict) -> None:
+        payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        with self._transaction() as connection:
+            tail = connection.execute("SELECT MAX(seq) FROM run_events WHERE scope = ?", (self._key,)).fetchone()[0]
+            if tail != state["seq"]:
+                raise JournalError(f"{self.path}: journal advanced while saving its checkpoint")
+            connection.execute("INSERT INTO checkpoints (scope, seq, state) VALUES (?, ?, ?) "
+                               "ON CONFLICT(scope) DO UPDATE SET seq = excluded.seq, state = excluded.state",
+                               (self._key, tail, payload))
+
     def write(self, record: dict) -> None:
         payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         with self._transaction() as connection:
@@ -94,10 +144,13 @@ class SQLiteJournal:
     def reset(self) -> None:
         if self.path.exists():
             with self._transaction() as connection:
+                if self._version(connection) >= 2:
+                    connection.execute("DELETE FROM checkpoints WHERE scope = ?", (self._key,))
                 connection.execute("DELETE FROM run_events WHERE scope = ?", (self._key,))
 
     def inner(self, node: str, round: int) -> SQLiteJournal:
-        return SQLiteJournal(self.path, scope=(*self._scope, (node, round)))
+        return SQLiteJournal(self.path, durable=self.durable, checkpoint_every=self.checkpoint_every,
+                             scope=(*self._scope, (node, round)))
 
     def discard(self) -> None:
         if self.path.exists():
