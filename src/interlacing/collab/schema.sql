@@ -11,6 +11,10 @@ CREATE TABLE IF NOT EXISTS il_runs (
     generation bigint NOT NULL DEFAULT 0, worker text, expires timestamptz,
     created timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+-- Existing runs retain their original serial scheduling on resume.
+ALTER TABLE il_runs ADD COLUMN IF NOT EXISTS workers integer NOT NULL DEFAULT 0 CHECK(workers BETWEEN 0 AND 32);
+ALTER TABLE il_runs ADD COLUMN IF NOT EXISTS description json;
+ALTER TABLE il_runs ADD COLUMN IF NOT EXISTS origin json;
 CREATE INDEX IF NOT EXISTS il_runs_project ON il_runs(project,created);
 CREATE TABLE IF NOT EXISTS il_commands (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, run uuid NOT NULL REFERENCES il_runs,

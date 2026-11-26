@@ -8,6 +8,8 @@ from uuid import UUID, uuid4
 
 from ..base import Ref, canonical
 from ..spec.kinds import schema_of
+from .history import fork_run, inspect_run, positions, read_history
+from .validation import validate_submission
 from .database import Database, Refused, encoded
 
 
@@ -51,15 +53,18 @@ class Collaboration:
 
     def request(self, token, action, args):
         with self.database.connect() as db:
+            if action in ("history", "inspect", "checkpoints", "fork"):
+                db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             actor = db.execute("SELECT project,name,role FROM il_members WHERE secret=%s FOR SHARE",
                                (_secret(token),)).fetchone()
             if not actor:
                 raise Refused("unknown member credentials")
             operations = {"tasks": self.tasks, "claim": self.claim, "submit": self.submit,
-                          "put": self.put, "get": self.get}
+                          "put": self.put, "get": self.get, "resources": self.resources}
             if actor["role"] == "manager":
                 operations.update(member=self.member, start=self.start, status=self.status, assign=self.assign,
-                                  audit=self.audit_log, retry=self.retry, history=self.history)
+                                  audit=self.audit_log, retry=self.retry, history=read_history, inspect=inspect_run, validate=self.validate,
+                                  fork=self.fork, checkpoints=positions)
             if action not in operations:
                 raise Refused("operation unavailable to this member")
             return operations[action](db, actor, **args)
@@ -98,6 +103,23 @@ class Collaboration:
         audit(db, project, actor["name"], "resource.put", name, {"namespace": space, **row})
         return {"namespace": namespace, "name": name, **row}
 
+    def resources(self, db, actor, namespace, prefix="", query="", after=None, limit=100):
+        if not isinstance(prefix, str) or not isinstance(query, str) or type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("provide text prefix/query and a limit from 1 to 500")
+        if after is None:
+            after = ["", 0]
+        if (not isinstance(after, list) or len(after) != 2 or not isinstance(after[0], str)
+                or type(after[1]) is not int or after[1] < 0):
+            raise ValueError("after must be [name, version]")
+        space = self._namespace(actor, namespace)
+        rows = db.execute("SELECT name,version,CASE WHEN data->>'file' IS NULL THEN 'json' ELSE 'file' END AS kind "
+                          "FROM il_resources WHERE project=%s AND namespace=%s AND starts_with(name,%s) AND "
+                          "(strpos(lower(name),lower(%s))>0 OR strpos(lower(COALESCE((data->'data')::text,'')),lower(%s))>0) "
+                          "AND (name,version)>(%s,%s) ORDER BY name,version LIMIT %s",
+                          (actor["project"], space, prefix, query, query, *after, limit+1)).fetchall()
+        return {"items": rows[:limit], "next": [rows[limit-1]["name"], rows[limit-1]["version"]]
+                if len(rows) > limit else None}
+
     def _resource(self, db, actor, namespace, name, version):
         space = self._namespace(actor, namespace)
         row = db.execute("SELECT data FROM il_resources WHERE project=%s AND namespace=%s AND name=%s AND version=%s",
@@ -113,10 +135,15 @@ class Collaboration:
             return {"file": base64.b64encode(content).decode("ascii"), "sha256": value["file"]}
         return value
 
-    def start(self, db, actor, graph, inputs=None, resources=None, assignments=None):
+    @staticmethod
+    def validate(db, actor, graph, workers=4):
+        return validate_submission(graph, workers)
+
+    def start(self, db, actor, graph, inputs=None, resources=None, assignments=None, workers=4):
         if not isinstance(graph, dict) or any(value is not None and not isinstance(value, dict)
                                                for value in (inputs, resources, assignments)):
-            raise Refused("graph, inputs, resources and assignments must be objects")
+            raise ValueError("graph, inputs, resources and assignments must be objects")
+        validate_submission(graph, workers)
         inputs = dict(inputs or {})
         resources = resources or {}
         for port, ref in resources.items():
@@ -130,29 +157,26 @@ class Collaboration:
                               (actor["project"], member)).fetchone():
                 raise Refused("unknown task assignee")
         run = str(uuid4())
-        db.execute("INSERT INTO il_runs(id,project,graph,inputs,resources,assignments) VALUES (%s,%s,%s,%s,%s,%s)",
-                   (run, actor["project"], encoded(graph), encoded(inputs), encoded(resources), encoded(assignments)))
+        db.execute("INSERT INTO il_runs(id,project,graph,inputs,resources,assignments,workers) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                   (run, actor["project"], encoded(graph), encoded(inputs), encoded(resources), encoded(assignments), workers))
         db.execute("INSERT INTO il_commands(run,key) VALUES (%s,'start')", (run,))
         audit(db, actor["project"], actor["name"], "run.start", run, {"resources": resources})
         return {"run": run}
 
     @staticmethod
+    def fork(db, actor, run, at, inputs=None, execute=False):
+        result = fork_run(db, actor["project"], run, at, inputs, execute)
+        audit(db, actor["project"], actor["name"], "run.fork", result["run"],
+              {"parent": run, "event": at, "execute": execute})
+        return result
+
+    @staticmethod
     def status(db, actor, run):
-        row = db.execute("SELECT state,result,generation,resources FROM il_runs WHERE id=%s AND project=%s",
+        row = db.execute("SELECT state,result,generation,resources,workers,origin FROM il_runs WHERE id=%s AND project=%s",
                          (UUID(str(run)), actor["project"])).fetchone()
         if not row:
             raise Refused("run unavailable")
         return row
-
-    @staticmethod
-    def history(db, actor, run, after=0, limit=100):
-        if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 1000:
-            raise Refused("invalid history range")
-        if not db.execute("SELECT 1 FROM il_runs WHERE id=%s AND project=%s",
-                          (UUID(str(run)), actor["project"])).fetchone():
-            raise Refused("run unavailable")
-        return db.execute("SELECT seq,record FROM il_events WHERE run=%s AND scope='[]'::jsonb AND seq>%s "
-                          "ORDER BY seq LIMIT %s", (run, after, limit)).fetchall()
 
     @staticmethod
     def retry(db, actor, run):

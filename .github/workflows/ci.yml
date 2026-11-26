@@ -35,6 +35,26 @@ jobs:
           uv pip install --python .clean-env/bin/python dist/*.whl
           cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/.clean-env/bin/python" "$GITHUB_WORKSPACE/scripts/package_smoke.py" "$GITHUB_WORKSPACE/examples/graphs"
 
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      INTERLACING_TEST_POSTGRES: postgresql://postgres:test@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e '.[postgres]' pytest
+      - run: python -m pytest -q tests/test_postgres_collab.py
+
   other-systems:
     runs-on: ${{ matrix.os }}
     strategy:

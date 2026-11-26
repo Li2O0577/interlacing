@@ -51,6 +51,29 @@ DONE, WAITING, STOPPED, FAILED, NEW, RUNNING = "done", "waiting", "stopped", "fa
 JOURNALS = ("jsonl", "sqlite")
 
 
+def fork_inputs(graph: dict, state: DurableState, inputs: Mapping[str, Any]) -> list:
+    from .spec.kinds import schema_of
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    overrides = []
+    for name, value in inputs.items():
+        if name not in graph["inputs"]:
+            raise SpecError(f"the graph has no input {name!r}")
+        edge = INPUT + name
+        sent = state.data["counters"].get(edge, 0)
+        previous = f"{edge}#{sent}"
+        if previous not in state.data["mail"] and state.seq != 1:
+            raise SpecError(f"graph input {name!r} is no longer available to override at this position")
+        node, _, port = graph["inputs"][name].rpartition(".")
+        described = next(item for item in nodes[node]["inputs"] if item["name"] == port)
+        try:
+            schema_of(described.get("schema")).check(value)
+            json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise SpecError(f"graph input {name}: {exc}") from None
+        overrides.append([edge, sent + 1, 0, pack_body(value), [], *([previous] if sent else [])])
+    return overrides
+
+
 class Pending(BaseException):
     """Raised inside a ``human`` node whose answer is not there yet. It is not an error: the engine lets it
     pass, the journal stays open, and the run is continued later."""
@@ -534,7 +557,7 @@ class Run:
         if state.pending:
             raise SpecError(f"cannot fork at event {at}: unfinished activations: {', '.join(sorted(state.pending))}")
         graph = _read(self.directory / "graph.json")
-        overrides = self._fork_inputs(graph, state, inputs or {})
+        overrides = fork_inputs(graph, state, inputs or {})
         target = type(self)(directory, models=self.models, observe=self.observe)
         location = target.directory.resolve()
         options = _read(self.directory / "options.json")
@@ -577,29 +600,6 @@ class Run:
         finally:
             records.close()
         return target
-
-    @staticmethod
-    def _fork_inputs(graph: dict, state: DurableState, inputs: Mapping[str, Any]) -> list:
-        from .spec.kinds import schema_of
-        nodes = {node["id"]: node for node in graph["nodes"]}
-        overrides = []
-        for name, value in inputs.items():
-            if name not in graph["inputs"]:
-                raise SpecError(f"the graph has no input {name!r}")
-            edge = INPUT + name
-            sent = state.data["counters"].get(edge, 0)
-            previous = f"{edge}#{sent}"
-            if previous not in state.data["mail"] and state.seq != 1:
-                raise SpecError(f"graph input {name!r} is no longer available to override at this position")
-            node, _, port = graph["inputs"][name].rpartition(".")
-            described = next(item for item in nodes[node]["inputs"] if item["name"] == port)
-            try:
-                schema_of(described.get("schema")).check(value)
-                json.dumps(value, allow_nan=False)
-            except (TypeError, ValueError) as exc:
-                raise SpecError(f"graph input {name}: {exc}") from None
-            overrides.append([edge, sent + 1, 0, pack_body(value), [], *([previous] if sent else [])])
-        return overrides
 
     def show(self, *, timeline: bool = False, at: int | None = None) -> dict:
         """Inspect the saved graph and journal without constructing or running nodes."""

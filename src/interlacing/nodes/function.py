@@ -7,6 +7,7 @@ method takes a plain function wherever it takes a node.
 from __future__ import annotations
 
 import inspect
+import time
 import typing
 from typing import Any, Callable, Iterable, Mapping
 
@@ -33,7 +34,7 @@ class FunctionNode(Node):
     kind = "function"
 
     def __init__(self, id: str, function: Callable, *, inputs: Iterable[Port] = (), outputs: Iterable[Port] = (),
-                 firing: Firing | None = None, context: bool = False):
+                 firing: Firing | None = None, context: bool = False, retry_attempts: int = 1):
         if isinstance(function, FunctionNode):
             function = function.function   # a function made into a node with @node: the function itself
         if not callable(function):
@@ -41,10 +42,16 @@ class FunctionNode(Node):
         super().__init__(id, inputs=inputs, outputs=outputs, firing=firing)
         self.function: Callable = function
         self.context = context
+        if type(retry_attempts) is not int or not 1 <= retry_attempts <= 16:
+            raise NodeError(f"{id}: retry_attempts must be an integer from 1 to 16")
+        if retry_attempts > 1 and (context or self.asynchronous):
+            raise NodeError(f"{id}: retry_attempts requires a synchronous function without context")
+        self.retry_attempts = retry_attempts
         self._sends = [name for name, port in self.outputs.items() if not port.call]
 
     def config(self) -> Mapping:
-        return {"function": named(self.function), "context": self.context}
+        return {"function": named(self.function), "context": self.context,
+                **({"retry_attempts": self.retry_attempts} if self.retry_attempts > 1 else {})}
 
     @property
     def asynchronous(self) -> bool:
@@ -52,10 +59,36 @@ class FunctionNode(Node):
         return inspect.iscoroutinefunction(function) or inspect.iscoroutinefunction(getattr(function, "__call__", None))
 
     def run(self, ctx, inputs: Mapping[str, Any]):
+        if self.retry_attempts > 1:
+            return self._retry(ctx, inputs)
         result = self.function(ctx, **inputs) if self.context else self.function(**inputs)
         if inspect.isawaitable(result):
             return _Later(self, result)          # the engine awaits it
         return self._shaped(result)
+
+    def _retry(self, ctx, inputs):
+        # Log each completed attempt. On replay the activation reads the same outcome
+        # and deadline, even if a different worker has taken ownership.
+        for attempt in range(1, self.retry_attempts + 1):
+            def invoke():
+                try:
+                    return {"value": self.function(**inputs)}
+                except (ConnectionError, TimeoutError) as exc:
+                    delay = min(5.0, 0.1 * 2 ** (attempt - 1))
+                    return {"error": str(exc), "timeout": isinstance(exc, TimeoutError),
+                            "next": time.time() + delay}
+            outcome = ctx.once(f"function-attempt-{attempt}", invoke)
+            if "value" in outcome:
+                return self._shaped(outcome["value"])
+            if attempt == self.retry_attempts:
+                error = TimeoutError if outcome["timeout"] else ConnectionError
+                raise error(f"{self.id} exhausted {attempt} attempts: {outcome['error']}")
+            while (remaining := outcome["next"] - time.time()) > 0:
+                if ctx.stopping():
+                    return None
+                time.sleep(min(remaining, 0.05))
+            if ctx.stopping():
+                return None
 
     def _shaped(self, result) -> Mapping[str, Any] | None:
         if result is None:

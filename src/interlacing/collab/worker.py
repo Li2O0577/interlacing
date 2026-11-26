@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import asdict
 from uuid import uuid4
 
@@ -54,7 +55,7 @@ def _bind_task(db, lease, task, node, turn):
 def execute(database: Database, lease: Lease, *, seconds=30, allow=(), models=None):
     """Drive the command until it finishes or waits. Reclaim after a worker exits via Database.claim."""
     with database.fenced(lease) as db:
-        run = db.execute("SELECT graph,inputs,project,assignments FROM il_runs WHERE id=%s", (lease.run,)).fetchone()
+        run = db.execute("SELECT graph,inputs,project,assignments,workers FROM il_runs WHERE id=%s", (lease.run,)).fetchone()
 
     def ask(node, turn, request, schema):
         with database.fenced(lease) as db:
@@ -81,10 +82,21 @@ def execute(database: Database, lease: Lease, *, seconds=30, allow=(), models=No
 
     done, lost = threading.Event(), threading.Event()
 
+    engine = None
+
     def heartbeat():
-        while not done.wait(seconds / 3):
+        renew_at = time.monotonic() + seconds / 3
+        while not done.wait(min(0.25, seconds / 3)):
             try:
-                database.renew(lease, seconds)
+                if time.monotonic() >= renew_at:
+                    database.renew(lease, seconds)
+                    renew_at = time.monotonic() + seconds / 3
+                if engine is not None and (tasks := engine.waiting_tasks()):
+                    with database.connect() as db:
+                        rows = db.execute("SELECT id::text AS task FROM il_tasks WHERE run=%s AND id=ANY(%s::uuid[]) "
+                                          "AND state IN ('submitted','superseded')", (lease.run, tasks)).fetchall()
+                    if rows:
+                        engine.wake_tasks({row["task"] for row in rows})
             except (LostLease, database.driver.Error):
                 lost.set()
                 return
@@ -96,7 +108,11 @@ def execute(database: Database, lease: Lease, *, seconds=30, allow=(), models=No
             catalog = Catalog(allow=allow, models=models, ask_typed=ask, max_workers=0,
                               protocols=standard(RunStore(database, lease, run["project"])))
             graph = load(run["graph"], catalog)
-            engine = Engine(graph, catalog.protocols, journal=PostgresJournal(database, lease), stopping=lost.is_set,
+            with database.fenced(lease) as db:
+                db.execute("UPDATE il_runs SET description=%s WHERE id=%s AND description IS NULL",
+                           (encoded(graph.describe()), lease.run))
+            engine = Engine(graph, catalog.protocols, workers=run["workers"], journal=PostgresJournal(database, lease),
+                            stopping=lost.is_set,
                             rebuild=lambda spec: load_node(spec, catalog))
             result = engine.go(run["inputs"])
             state, value = ("done" if result.complete else "stopped"), asdict(result)

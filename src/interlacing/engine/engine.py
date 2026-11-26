@@ -150,7 +150,7 @@ class Engine:
         self._observe = observe
         self._ledger = Ledger(budget)
         self._id: str | None = None         # names this run: the first part of every activation's key
-        self._waiting_tasks: list[str] = []
+        self._waiting_tasks: dict[str, list[str]] = {}
         self._limit = time_limit
         self._firm = bool(firm)             # no node may give itself longer than time_limit
         self._parent: tuple | None = None   # (outer engine, the outer node's state, its activation's record)
@@ -316,7 +316,7 @@ class Engine:
     def _check_durable_graph(graph: Graph) -> None:
         unsupported = [edge.id for edge in graph.edges if edge.protocol not in ("value", "artifact") or edge.challenges]
         if unsupported:
-            raise GraphError(f"durable SQLite journals require value or artifact edges without challenges: {', '.join(unsupported)}")
+            raise GraphError(f"durable journals require value or artifact edges without challenges: {', '.join(unsupported)}")
 
     def _restore_durable(self, recorder: Recorder, change: bool) -> bool:
         if change:
@@ -1060,7 +1060,7 @@ class Engine:
                 raise cause                 # an interrupt or an exit request passes through as itself
             raise self._error
         if self._waiting_tasks:
-            raise WaitingForTasks(self._waiting_tasks)
+            raise WaitingForTasks(self.waiting_tasks())
         result.envelopes = self._sched.envelopes
         result.rounds = {id: state.round for id, state in self._states.items() if state.round}
         result.limited = tuple(self._limited)
@@ -1072,6 +1072,29 @@ class Engine:
         if self._error:                     # the observer failed on the last thing it was told
             raise self._error
         return result
+
+    def waiting_tasks(self) -> list[str]:
+        """Task IDs parked by this drive, including waits reported by child graphs."""
+        with self._lock:
+            return [task for group in self._waiting_tasks.values() for task in group]
+
+    def wake_tasks(self, ready: set[str]) -> None:
+        """Replay matching parked bindings while other activations keep this drive alive.
+
+        Once the drive drains, the host's durable resume command takes over instead.
+        """
+        with self._lock:
+            if self._over or not self._active or self._sched.stopped:
+                return
+            for node, group in list(self._waiting_tasks.items()):
+                if ready.isdisjoint(group):
+                    continue
+                state = self._states[node]
+                self._sched.give_back(state)
+                state.status = ACTIVE
+                del self._waiting_tasks[node]
+                self._sched.consider(state)
+            self._lock.notify_all()
 
     def _watch(self) -> None:
         """Run the workers in threads of their own and watch the clock for them. The order of activations is
@@ -1422,7 +1445,7 @@ class Engine:
             with lock:
                 if self._over:
                     return False
-                self._waiting_tasks.extend(failure.tasks)
+                self._waiting_tasks[node.id] = failure.tasks
                 state.status = PAUSED  # this drive only: the durable binding is replayed when a command arrives
                 self._release(state)
             return True

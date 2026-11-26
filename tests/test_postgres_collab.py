@@ -290,3 +290,212 @@ def test_input_revision_supersedes_pending_human_task_and_reissues_it(service):
     a('submit', task=current['id'], version=current['version'], answer='accepted 7')
     assert drive()['state'] == 'done'
     assert lead('status', **run)['result']['outputs'] == {'accepted':['accepted 7']}
+
+
+def wait_for_release(path):
+    import time
+    from pathlib import Path
+    deadline = time.monotonic() + 10
+    while not Path(path).is_file():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("approval did not arrive during slow work")
+        time.sleep(.02)
+    return 17
+
+
+def release_slow_after_approval(path):
+    from pathlib import Path
+    Path(path).touch()
+    return "approved"
+
+
+def test_review_can_be_submitted_before_parallel_sibling_finishes(service, tmp_path):
+    import time
+    db, lead, alice, _ = service
+    graph = {'nodes': [{'id':'slow','kind':'function','function':__name__+'.wait_for_release'},
+                       {'id':'fast','kind':'pass'}, {'id':'review','kind':'human'},
+                       {'id':'publish','kind':'function','function':__name__+'.release_slow_after_approval'}],
+             'inputs': {'path':'slow.path','quote':'fast.x'},
+             'edges': [{'from':'fast.y','to':'review.request'}, {'from':'review.answer','to':'publish.path'}],
+             'outputs': {'slow':'slow.out','approval':'publish.out'}}
+    gate = tmp_path / 'release'
+    run = lead('start', graph=graph, inputs={'path':str(gate),'quote':8}, assignments={'review':'Alice'})
+    with ThreadPoolExecutor(1) as pool:
+        future = pool.submit(work_one, db, 'first', allow=[__name__])
+        try:
+            deadline = time.monotonic() + 8
+            while not (tasks := alice('tasks')):
+                assert time.monotonic() < deadline
+                time.sleep(.02)
+            assert not future.done() and tasks[0]['request'] == 8
+            alice('submit', task=tasks[0]['id'], version=1, answer=str(gate))
+            assert future.result(timeout=6)['state'] == 'done'
+        finally:
+            gate.touch()
+    assert work_one(db, 'next', allow=[__name__]) is None
+    assert lead('status', **run)['result']['outputs'] == {'slow':[17], 'approval':['approved']}
+    events = [v['record'] for v in lead('history', **run)]
+    assert [v.get('node') for v in events if v['kind'] == 'act'].count('slow') == 1
+
+
+def temporary_failure(marker):
+    from pathlib import Path
+    path = Path(marker)
+    if not path.exists():
+        path.touch()
+        raise TimeoutError("busy")
+    return 42
+
+
+def test_client_preflight_and_retry_contract(service, tmp_path, monkeypatch):
+    from interlacing.collab.client import Client, ServiceError
+    db, _, _, _ = service
+    monkeypatch.setenv('no_proxy', '127.0.0.1')
+    token = Collaboration(db).bootstrap(str(uuid4()), 'operator')['token']
+    with server(db, 0) as http:
+        thread = threading.Thread(target=http.serve_forever)
+        thread.start()
+        try:
+            client = Client('http://127.0.0.1:' + str(http.server_port), token)
+            bad = {'method':'chain','nodes':[{'kind':'block','id':'inner','graph':{
+                'edges':[{'from':'p.x','to':'q.y','protocol':'stream'}]}}]}
+            for action in ('validate', 'start'):
+                with pytest.raises(ServiceError, match=r'graph.nodes\[0\].graph.edges\[0\]') as error:
+                    client.request(action, graph=bad)
+                assert error.value.status == 400 and error.value.code == 'invalid_request'
+            assert work_one(db, 'empty') is None
+            graph = {'method':'chain','nodes':[{'kind':'function','id':'fetch',
+                      'function':__name__+'.temporary_failure', 'retry_attempts':2}]}
+            assert client.request('validate', graph=graph)['workers'] == 4
+            run = client.request('start', graph=graph, inputs={'in':str(tmp_path/'once')}, workers=0)
+            assert work_one(db, 'retry', allow=[__name__])['state'] == 'done'
+            assert client.request('status', **run)['result']['outputs'] == {'out':[42]}
+            history = client.request('history', **run)
+            assert list(client.events(**run, follow=True, after=1)) == history[1:]
+            attempts = [e['record']['value'] for e in history if e['record']['kind']=='once']
+            assert len(attempts) == 2 and attempts[0]['timeout'] and attempts[1]['value'] == 42
+        finally:
+            http.shutdown()
+            thread.join()
+
+
+def test_two_forks_preserve_parent_answers_and_project_boundary(service):
+    db, lead, alice, _ = service
+    parent = lead('start', graph=REVIEW, inputs={'x':'original'}, assignments={'review':'Alice'})
+    assert work_one(db,'first')['state'] == 'waiting'
+    pos = lead('checkpoints', **parent)
+    assert pos['checkpoints'] == [1, pos['last_event']]
+    with pytest.raises(ValueError, match='unfinished'):
+        lead('fork', **parent, at=pos['last_event'])
+    task, = alice('tasks')
+    alice('submit', task=task['id'], version=1, answer=10)
+    assert work_one(db,'second')['state'] == 'done'
+    before = lead('history', **parent)
+    preview = lead('fork', **parent, at=1)
+    assert lead('status', run=preview['run'])['state'] == 'preview'
+    assert work_one(db,'idle') is None
+    outside = Collaboration(db)
+    stranger = outside.bootstrap(str(uuid4()),'lead')['token']
+    with pytest.raises(Refused):
+        outside.request(stranger, 'fork', {**parent, 'at':1})
+    for answer in (20, 30):
+        fork = lead('fork', **parent, at=1, inputs={'x':str(answer)}, execute=True)
+        assert fork['origin']['run'] == parent['run']
+        assert work_one(db,'branch')['state'] == 'waiting'
+        pending, = [t for t in alice('tasks') if t['run'] == fork['run']]
+        assert pending['request'] == str(answer) and pending['id'] != task['id']
+        alice('submit', task=pending['id'], version=1, answer=answer)
+        assert work_one(db,'finish')['state'] == 'done'
+        assert lead('status', run=fork['run'])['result']['outputs']['answer'] == [answer]
+    finished = lead('fork', **parent, at=before[-1]['seq'], execute=True)
+    assert work_one(db,'settled')['state'] == 'done'
+    assert lead('status', run=finished['run'])['result']['outputs']['answer'] == [10]
+    assert not any(t['run'] == finished['run'] for t in alice('tasks'))
+    assert lead('history', **parent) == before
+    assert lead('status', **parent)['result']['outputs']['answer'] == [10]
+
+
+def test_remote_scope_history_and_private_resource_search(service):
+    db, lead, alice, bob = service
+    for version in range(1, 4):
+        assert alice('put', namespace='personal', name='notes', data={'body':'Tide'})['version'] == version
+    alice('put', namespace='personal', name='other', data='wind')
+    first = alice('resources', namespace='personal', query='tide', limit=1)
+    assert first == {'items':[{'name':'notes','version':1,'kind':'json'}], 'next':['notes',1]}
+    second = alice('resources', namespace='personal', query='tide', after=first['next'])
+    assert [r['version'] for r in second['items']] == [2, 3] and second['next'] is None
+    assert bob('resources', namespace='personal', query='tide')['items'] == []
+    graph = {'method':'chain','nodes':[{'id':'outer','kind':'block','graph':{
+        'method':'chain','nodes':[{'id':'inner','kind':'block','graph':REVIEW}]}}]}
+    run = lead('start', graph=graph, inputs={'in':'approve'})
+    assert work_one(db,'wait')['state'] == 'waiting'
+    scope = [['outer',1],['inner',1]]
+    assert lead('history', **run, scope=scope)[-1]['record']['kind'] == 'bind'
+    assert 'outer' in lead('inspect', **run)['pending']
+    task, = alice('tasks')
+    alice('submit', **alice('claim', task=task['id'], version=1), answer=17)
+    assert work_one(db,'finish')['state'] == 'done'
+    archived = lead('history', **run, scope=scope)
+    assert archived and all(item['archived'] for item in archived)
+    assert any(item['record'].get('node') == 'review' for item in archived)
+    assert lead('inspect', **run)['outputs'] == {'out':[17]}
+    assert lead('inspect', **run, at=1)['outputs'] == {}
+    with pytest.raises(Refused):
+        bob('inspect', **run)
+
+
+def test_interrupted_retry_respects_attempt_budget(service, tmp_path, monkeypatch):
+    from pathlib import Path
+    db, lead, _, _ = service
+    module = tmp_path / 'business_service.py'
+    module.write_text("from pathlib import Path\ndef unavailable(marker):\n"
+                      "    with Path(marker).open('a') as f: f.write('attempt\\n')\n"
+                      "    raise ConnectionError('offline')\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    marker = tmp_path / 'attempts'
+    graph = {'method':'chain','nodes':[{'id':'fetch','kind':'function','function':'business_service.unavailable',
+                                        'retry_attempts':2}]}
+    run = lead('start', graph=graph, inputs={'in':str(marker)})
+    code = """
+import os
+from interlacing.collab.database import Database, PostgresJournal
+from interlacing.collab.worker import work_one
+write=PostgresJournal.write
+def cut(self, record):
+    write(self, record)
+    if record['kind'] == 'once':
+        os._exit(43)
+PostgresJournal.write=cut
+work_one(Database(os.environ['INTERLACING_TEST_POSTGRES']), 'first', allow=['business_service'])
+"""
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(tmp_path), os.environ.get('PYTHONPATH','')]))
+    assert subprocess.run([sys.executable,'-c',code], env=env, timeout=15).returncode == 43
+    with db.connect() as conn:
+        conn.execute("UPDATE il_runs SET expires=clock_timestamp() WHERE id=%s", (run['run'],))
+    assert work_one(db,'next',allow=['business_service'])['state'] == 'failed'
+    assert 'exhausted 2 attempts' in lead('status', **run)['result']['error']
+    assert Path(marker).read_text().splitlines() == ['attempt', 'attempt']
+
+
+def test_schema_upgrade_preserves_previous_run_configuration(service):
+    db, *_ = service
+    schema = 'legacy_' + uuid4().hex
+    with db.connect() as conn:
+        conn.execute(f'CREATE SCHEMA {schema}')
+    legacy = Database(db.driver.conninfo.make_conninfo(db.dsn, options=f'-c search_path={schema}'))
+    try:
+        legacy.install()
+        with legacy.connect() as conn:
+            conn.execute('ALTER TABLE il_runs DROP COLUMN workers, DROP COLUMN description, DROP COLUMN origin')
+            conn.execute('UPDATE il_schema SET version=1')
+            conn.execute("INSERT INTO il_projects VALUES ('team')")
+            conn.execute("INSERT INTO il_runs(id,project,graph,inputs,resources,assignments) "
+                         "VALUES (%s,'team','{}','{}','{}','{}')", (str(uuid4()),))
+        legacy.install()
+        legacy.install()
+        with legacy.connect() as conn:
+            assert conn.execute('SELECT workers,origin FROM il_runs').fetchone() == {'workers':0,'origin':None}
+            assert conn.execute('SELECT version FROM il_schema').fetchone()['version'] == 2
+    finally:
+        with db.connect() as conn:
+            conn.execute(f'DROP SCHEMA {schema} CASCADE')

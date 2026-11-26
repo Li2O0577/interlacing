@@ -46,24 +46,24 @@ def server(database, port):
 
         def do_POST(self):
             if self.path != "/v1/request":
-                return self.reply(404, {"error": "unknown endpoint"})
+                return self.reply(404, {"code": "not_found", "error": "unknown endpoint"})
             scheme, _, token = self.headers.get("Authorization", "").partition(" ")
             if scheme.lower() != "bearer" or not token:
-                return self.reply(401, {"error": "member credentials required"})
+                return self.reply(401, {"code": "credentials_required", "error": "member credentials required"})
             try:
                 size = int(self.headers.get("Content-Length", "0"))
                 if not 0 < size <= 16 * 1024 * 1024:
-                    return self.reply(413, {"error": "request requires a body of at most 16 MiB"})
+                    return self.reply(413, {"code": "invalid_size", "error": "request requires a body of at most 16 MiB"})
                 payload = json.loads(self.rfile.read(size))
                 if not isinstance(payload, dict) or not isinstance(payload.get("args", {}), dict):
                     raise ValueError("expected an action and an object of arguments")
                 result = service.request(token, payload["action"], payload.get("args", {}))
             except Refused as exc:
-                return self.reply(403, {"error": str(exc)})
+                return self.reply(403, {"code": "request_refused", "error": str(exc)})
             except (TypeError, ValueError, KeyError) as exc:
-                return self.reply(400, {"error": str(exc)})
+                return self.reply(400, {"code": "invalid_request", "error": str(exc)})
             except database.driver.Error:
-                return self.reply(503, {"error": "database request failed"})
+                return self.reply(503, {"code": "database_unavailable", "error": "database request failed"})
             self.reply(200, result)
 
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)

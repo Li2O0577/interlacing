@@ -40,9 +40,51 @@ interlacing collab serve --port 8765
 
 `start.resources` 将图输入名映射到资料的命名空间、名称和具体版本。运行使用创建时固定的 JSON 值，文件输入得到包含摘要与大小的引用。成员可以通过 `get` 读取有权限的文件。文件与 artifact 内容使用项目配置的内容存储，PostgreSQL 保存引用、版本和访问范围。个人资料只对其所有者开放。HTTP 每次请求的上限为 16 MiB，包括 base64 编码开销。
 
-## 从本地图迁移时
+## 服务端并行
 
-协作工作进程启用持久化投递。当前支持未开启质疑的 `value` 和 `artifact` 边，含 `stream` 或 `call` 边的图会在工作进程加载时失败。提交成功表示运行已入队。多个工作进程可并行处理独立运行，单次运行内的同步计算采用默认串行配置。多个就绪的人工任务仍可同时等待答复。主管可按页查看根运行历史；检查点列表、历史分叉和子作用域浏览目前只在部分本地入口提供。详情见[本地与服务端能力对照](LANGGRAPH_COMPARISON.md)。
+新运行默认给顶层图 4 个工作线程，`start.workers` 可设为 0 至 32，0 表示串行。每条运行继续由一个持有效租约的进程推进。多个进程可以分别接手不同运行。升级已有数据库时，停止旧版服务与工作进程，运行新版 `interlacing collab init`，然后启动新版本。该命令可重复执行，原有运行保留串行设置。
+
+一条 `from → to` 的边指定下游要读取哪个端口。互不依赖的节点可同时运行，依赖节点沿用原图的端口就绪规则。无需增加专门的并行边。快节点的已提交输出可以交给人工审核；当慢支路仍在执行，工作进程也能接收审核答复并推进快支路的下游。如果本次调度已退出，持久化续跑命令会唤起下一次调度。服务中的嵌套块内部仍按串行配置运行。
+
+持久化图支持未开启质疑的 `value` 和 `artifact` 边。主管可先调用 `validate(graph, workers)`，返回已检查项和工作进程仍需检查的项。`start` 执行相同预检，显式声明的 `stream`、`call` 和质疑边在入队前给出描述中的位置。函数签名、模型配置、编译后的图和运行输入还要由工作进程按其授权目录检查。
+
+## Python 客户端与节点重试
+
+客户端只依赖 Python 标准库。示例使用已有运行的编号和主管令牌。HTTP 接口保持 `POST /v1/request`。错误答复含可读的 `error` 和机器可读的 `code`，Python 端的 `ServiceError` 提供 `status` 和 `code`。
+
+```python
+from interlacing.collab.client import Client, ServiceError
+
+client = Client("http://127.0.0.1:8765", manager_token)
+try:
+    current = client.request("inspect", run=run_id)
+    for event in client.events(run_id, after=current["event"], follow=True):
+        print(event["seq"], event["record"]["kind"])
+except ServiceError as error:
+    print(error.status, error.code, str(error))
+```
+
+对于向业务 API 发请求的同步函数节点，可设 `retry_attempts`（1 至 16，默认 1）。例如 `{"id":"price","kind":"function","function":"shop.quote","retry_attempts":3}`。该函数接受普通输入并返回 JSON 结果。遇到 `ConnectionError` 或 `TimeoutError` 时按指数退避重试，其他异常直接报告。每次完成的尝试都随激活记入日志；中断接管后沿用尝试次数和退避截止时间。外部有副作用的请求应携带业务幂等键，以覆盖外部服务响应到本地记账之间的崩溃窗口。带 `ctx` 的函数和异步函数仍自行管理重试。
+
+## 远程检查、执行分叉与资料查找
+
+| 操作 | 输入及结果 |
+|---|---|
+| `checkpoints`、`inspect`（主管） | 按 `run` 列出根事件末尾与保留的检查点。`inspect(run, at)` 返回该事件的输出、待完成的激活、待返工项及能否分叉。`current_status` 是查询当下的运行状态。 |
+| `fork`（主管） | 提供 `run`、根事件序号 `at`，可选 `inputs` 替换尚未消费的图输入。默认创建可查看的预览，显式传 `execute: true` 会在独立运行中执行后续节点。结果含新运行 UUID 和来源位置。 |
+| `history`（主管） | 缺省读取根历史，可传 `scope: [["block",1],["child",1]]` 选择嵌套激活。运行中的作用域返回事件；已清理的子日志返回留存的溯源元数据，并标记 `archived: true`。两者都按 `seq` 分页。客户端的 `events` 可用游标继续轮询。 |
+| `resources`（项目成员、主管） | `namespace` 选 shared 或 personal。`prefix` 按名称前缀过滤，`query` 对名称与 JSON 文本执行不区分大小写的子串匹配。文件只匹配名称。结果含名称、版本和种类，下一页将 `next` 传为 `after`。使用 `get` 取回选定版本。 |
+
+分叉事务从选定事件重建已提交状态。它保留来源、已完成的工作和当时的输入版本，新任务使用独立编号。未完成的激活须先结束，或选择更早的位置。旧版运行若缺少已编译的端口描述，仍可原样分叉；覆盖输入时需要能够还原端口类型。可执行分叉可能产生新的外部调用。
+
+```python
+# 把 run_id 的初始报价换成另一份，先查看预览的来源。
+preview = client.request("fork", run=run_id, at=1, inputs={"quote": "新版报价"})
+print(client.request("inspect", run=preview["run"])["origin"])
+matches = client.request("resources", namespace="shared", query="报价", limit=20)
+for item in matches["items"]:
+    print(item["name"], item["version"])
+```
 
 ## 提交与接管
 
