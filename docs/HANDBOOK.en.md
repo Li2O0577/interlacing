@@ -1,6 +1,6 @@
 # interlacing · Python user and maintainer guide
 
-[中文](HANDBOOK.zh-CN.md) · **English** · Python 3.11+. The first example works with the published **0.16.2**. For durable SQLite runs, PostgreSQL collaboration and the newer CLI commands, install this branch from its repository root with `python -m pip install -e ".[postgres]"` (use `-e .` for local runs). Start with the first two examples if you are new. If you inherited a graph, start with the maintainer map at the end.
+[中文](HANDBOOK.zh-CN.md) · **English** · Python 3.11+. Install the core package for local JSONL and SQLite runs. For the PostgreSQL collaboration service, use `python -m pip install "interlacing[postgres]==0.17.0"`. Start with the first two examples if you are new. If you inherited a graph, start with the maintainer map at the end.
 
 [Quick start](#start) · [Graphs and ordering](#graph) · [Edge protocols](#edges) · [Choosing nodes](#nodes) · [Composition](#compose) · [Execution and recovery](#run) · [Challenges and corrections](#review) · [JSON, CLI and MCP](#cli) · [Maintenance and troubleshooting](#maintain)
 
@@ -11,7 +11,7 @@
 An experiment produces three readings. Compute their range and turn it into a sentence. Save the Python block below as a script and run it locally. Install the release with:
 
 ```sh
-python -m pip install interlacing==0.16.2
+python -m pip install interlacing==0.17.0
 ```
 
 ```python
@@ -146,7 +146,7 @@ A **method** is a reusable wiring pattern. Use `Chain(a, b)` for sequential work
 
 ## 7 · Who handles a questionable result?
 
-| What happened | Who decides | Behavior in 0.16.2 |
+| What happened | Who decides | Behavior in 0.17.0 |
 |---|---|---|
 | A produces a structurally invalid output | Output port | `Port("score", check=validate, repairs=1)` can trigger repair, warning or failure according to its settings |
 | B1 has evidence that A’s simulation result is wrong | B1 raises the question; A answers | Enable challenges with `connect(..., challenges=N)`. B1 calls `ctx.reject(port, reason)` and waits; specify `which` for multiple senders. A explains or corrects. Ordinary nodes can implement `challenged(ctx, rejection)` |
@@ -220,7 +220,7 @@ Use the PostgreSQL collaboration service for project memberships, human task ass
 
 ## 9 · Maintainer map and troubleshooting
 
-**Publishing a version.** Set `__version__` in `src/interlacing/__init__.py`, update the tested pip install example in both handbooks and move the unreleased changes under the version in the changelog. Use a fresh tag that exactly matches the package version with a `v` prefix. For example, Python version `0.17.0b1` takes tag `v0.17.0b1`. Target the tested commit and mark a beta as a GitHub pre-release. Publishing the release triggers the test, build and PyPI upload workflow. Check the separate PostgreSQL CI job on that commit as well. Earlier tags and packages remain available. [Release workflow](../.github/workflows/release.yml) · [CI workflow](../.github/workflows/ci.yml)
+**Publishing a version.** Set `__version__` in `src/interlacing/__init__.py`, update the tested pip install example in both handbooks and move the unreleased changes under the version in the changelog. Use a fresh tag that exactly matches the package version with a `v` prefix. Python version `0.17.0` takes tag `v0.17.0`. Target the tested commit. Publishing the release triggers the test, build and PyPI upload workflow. Check the separate PostgreSQL CI job on that commit as well. Earlier tags and packages remain available. [Release workflow](../.github/workflows/release.yml) · [CI workflow](../.github/workflows/ci.yml)
 
 Start with the layer that owns the behavior, then find a test that exercises its observable effects.
 

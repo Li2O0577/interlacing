@@ -4,7 +4,7 @@
 
 ## 启动
 
-从 `codex/journal-backend` 分支的仓库根目录运行 `python -m pip install -e ".[postgres]"`。已发布的 0.16.2 提供原有本地运行方式；本页的协作命令随功能分支提供。为服务和工作进程设置 `INTERLACING_POSTGRES_DSN`，连接一个专用 PostgreSQL 数据库。初始化账号需要建表权限。使用文件或 artifact 边时，将 `INTERLACING_CONTENT_DIR` 指向所有进程均能访问的同一个内容目录。客户端使用成员令牌。
+使用 Python 3.11 或更高版本，执行 `python -m pip install "interlacing[postgres]==0.17.0"`。为服务和工作进程设置 `INTERLACING_POSTGRES_DSN`，连接一个专用 PostgreSQL 数据库。初始化账号需要建表权限。使用文件或 artifact 边时，将 `INTERLACING_CONTENT_DIR` 指向所有进程均能访问的同一个内容目录。客户端使用成员令牌。
 
 ```sh
 interlacing collab init

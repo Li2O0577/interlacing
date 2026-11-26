@@ -1,6 +1,6 @@
 # interlacing · Python 使用与维护手册
 
-**中文** · [English](HANDBOOK.en.md) · 需要 Python 3.11+。第一个例子可用已发布的 **0.16.2** 运行。使用本手册中的持久化 SQLite、PostgreSQL 协作和新增 CLI 命令，请在本分支仓库根目录执行 `python -m pip install -e ".[postgres]"`（仅本地运行可用 `-e .`）。第一次使用，先做前两个例子；接手一个已有项目，直接查最后的维护地图。
+**中文** · [English](HANDBOOK.en.md) · 需要 Python 3.11+。本地 JSONL 和 SQLite 运行只需安装核心包。使用 PostgreSQL 协作服务时，执行 `python -m pip install "interlacing[postgres]==0.17.0"`。第一次使用，先做前两个例子。接手已有项目，可以从最后的维护地图读起。
 
 [快速开始](#start) · [建图与顺序](#graph) · [协议选择](#edges) · [节点选择](#nodes) · [组合与动态结构](#compose) · [运行与恢复](#run) · [质疑与更正](#review) · [JSON、CLI 与 MCP](#cli) · [维护与排错](#maintain)
 
@@ -11,7 +11,7 @@
 一个实验产生三个读数。我们要计算读数的跨度，并把它写成一句话。把下面的 Python 代码保存为脚本执行即可；本节全部在本地运行。安装发布版：
 
 ```sh
-python -m pip install interlacing==0.16.2
+python -m pip install interlacing==0.17.0
 ```
 
 ```python
@@ -146,7 +146,7 @@ assert run(agent, {"task": "Check availability"}).last("out") == "ready"
 
 ## 7 · 输出不对时，谁来处理？
 
-| 发生了什么 | 谁做决定 | 0.16.2 的行为 |
+| 发生了什么 | 谁做决定 | 0.17.0 的行为 |
 |---|---|---|
 | A 发出前就发现产物格式不合规 | 输出端口 | `Port("score", check=validate, repairs=1)` 按配置尝试修复、警告或失败 |
 | B1 结合其他证据怀疑 A 的模拟结果 | B1 主动提问，A 答复 | 边用 `connect(..., challenges=N)` 允许质疑。B1 调 `ctx.reject(port, reason)` 等答复；多来源时可用 `which` 指定发送者。A 解释或更正，普通节点也能实现 `challenged(ctx, rejection)` |
@@ -218,7 +218,7 @@ PostgreSQL 协作服务支持项目成员、人工任务认领和多个工作进
 
 ## 9 · 维护地图和排错
 
-**发布新版本。** 更新 `src/interlacing/__init__.py` 的 `__version__`，同步两版手册中测试会检查的 pip 安装示例，把变更日志的待发布内容归入新版本。每个版本使用新标签，名称为 `v` 加完整包版本。例如 Python 版本 `0.17.0b1` 对应标签 `v0.17.0b1`。标签指向通过验证的提交，测试版在 GitHub 勾选预发行。发布后工作流自动测试、构建并上传 PyPI。另行核对同一提交的 PostgreSQL CI 作业。旧标签和旧安装包可以继续使用。[发布工作流](../.github/workflows/release.yml) · [CI 工作流](../.github/workflows/ci.yml)
+**发布新版本。** 更新 `src/interlacing/__init__.py` 的 `__version__`，同步两版手册中测试会检查的 pip 安装示例，把变更日志的待发布内容归入新版本。每个版本使用新标签，名称为 `v` 加完整包版本。例如 Python 版本 `0.17.0` 对应标签 `v0.17.0`。标签指向通过验证的提交。发布后工作流自动测试、构建并上传 PyPI。另行核对同一提交的 PostgreSQL CI 作业。旧标签和旧安装包可以继续使用。[发布工作流](../.github/workflows/release.yml) · [CI 工作流](../.github/workflows/ci.yml)
 
 改一个行为时，先找拥有这条规则的层，再找能观察到它的测试。
 

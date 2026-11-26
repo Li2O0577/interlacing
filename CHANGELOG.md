@@ -4,7 +4,7 @@ Versions before 1.0 may change any interface; each change is listed here. From 1
 by `interlacing` and the formats of graph files, run directories and journals change incompatibly only
 with a new major version.
 
-## Unreleased
+## 0.17.0
 
 - Keep local JSONL runs as the default. SQLite run directories can opt into durable delivery, inspect earlier events and fork an independent run.
 - Use PostgreSQL for project membership, task assignment and versioned human approvals. Workers can execute independent root branches in parallel and reclaim interrupted runs. Durable value and artifact edges support challenges, explanations and corrections.
