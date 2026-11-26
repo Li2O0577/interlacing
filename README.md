@@ -12,7 +12,7 @@ Join anything into a graph and run it.
 - An **edge** carries information from one node to another under a written protocol: queued values, latest value only, state, signals, streams, calls that are answered, files passed by path.
 - A **method** is a ready-made way of joining nodes: chain, loop, fan-out and join, tree, star, a tree that needs a person's consent, a pool of members that appear when called.
 
-The engine runs the graph and looks after the run: outputs are checked, usage is counted against a budget, activations are timed, everything is journaled so an interrupted run carries on, and an observer is told what happens as it happens. The package is a kernel to build frameworks on. It depends on the Python standard library and nothing else.
+The engine runs the graph and looks after the run: outputs are checked, usage is counted against a budget, activations are timed, everything is journaled so an interrupted run carries on, and an observer is told what happens as it happens. The package is a kernel to build frameworks on. The core runs on the Python standard library. The optional PostgreSQL collaboration service also requires the postgres extra (psycopg).
 
 ## Install
 
@@ -241,9 +241,11 @@ The kernel carries information and looks after the run. How a model thinks, how 
 
 Each layer uses only the layers below it. The engine knows no particular node, protocol or method; a test in `tests/test_engine.py` holds it to that. Inside, the engine is a few small parts, each with one job: the mailboxes a graph becomes (`wiring`), when a node may run (`scheduler`), what is checked and what follows a problem (`checks`), the budget (`ledger`), the journal (`recorder`), time limits (`clock`).
 
-The full description is [docs/GRAPH.en.md](https://github.com/Li2O0577/interlacing/blob/main/docs/GRAPH.en.md) (also [in Chinese](https://github.com/Li2O0577/interlacing/blob/main/docs/GRAPH.md)). Nineteen examples that run as they stand are in [examples/graphs/](https://github.com/Li2O0577/interlacing/tree/main/examples/graphs), and graphs written as JSON in [examples/data/](https://github.com/Li2O0577/interlacing/tree/main/examples/data).
+The full description is [docs/GRAPH.en.md](https://github.com/Li2O0577/interlacing/blob/main/docs/GRAPH.en.md) (also [in Chinese](https://github.com/Li2O0577/interlacing/blob/main/docs/GRAPH.md)). Twenty examples that run as they stand are in [examples/graphs/](https://github.com/Li2O0577/interlacing/tree/main/examples/graphs), and graphs written as JSON in [examples/data/](https://github.com/Li2O0577/interlacing/tree/main/examples/data).
 
 On the PostgreSQL feature branch, see the [collaboration service guide](docs/POSTGRES.md) for task assignment, claims and recovery. The [capability review against LangGraph (Chinese)](docs/LANGGRAPH_COMPARISON.md) records the tested scheduling difference and the limits of the service API.
+
+The [branch review](docs/BRANCH_REVIEW.md) records reproduced issues and recovery checks. The [implementation plan](docs/NEXT_PLAN.md) lists acceptance criteria for the next five capabilities. Both documents are in Chinese.
 
 ## Tests
 

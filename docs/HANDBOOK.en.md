@@ -181,6 +181,8 @@ For a new run, add `--journal sqlite` to store its execution history in `journal
 
 Add `--durable` with `--journal sqlite` on `run` or `serve` to commit each delivery before its receiver can start. The runtime records actual input deliveries before node code runs. Recovery loads a periodic checkpoint and the later events. An unfinished node can replay with its original inputs. A matching operation reuses its committed delivery and publishes nothing again. Replay that produces a different value or different graph edit fails. Explicit progress uses `ctx.commit()`, `snapshot/restore` and `ctx.resumed`. Python code opts in with `SQLiteJournal(path, durable=True)`.
 
+For `artifact` edges, configure the Python engine with a content store, such as `standard(DirectoryStore(...))`. The default catalog used by the local CLI and `Run.create` omits this protocol. PostgreSQL workers use the content directory configured for the service.
+
 **View history and fork a run.** The following commands apply to a started durable SQLite run. Event `1` records the initial inputs. `checkpoints` lists up to 16 retained recovery snapshots. `show --at` can still inspect any committed event position, including the graph version, output values and unfinished activations at that position.
 
 ```console

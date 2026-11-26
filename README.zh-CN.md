@@ -12,7 +12,7 @@
 - **边**按一份写明的协议把信息从一个节点带到另一个节点：排队的值、只留最新值、状态、信号、流、有应答的调用、按路径传递的文件。
 - **方法**是把节点连起来的现成方式：链、环、分发再汇合、树、星形、需要人同意的树、成员在被叫到时才出现的池。
 
-引擎运行这张图并照看这次运行：输出要经过检查，用量按预算计数，每次激活都计时，所有事情写入日志，被打断的运行可以接着跑，观察者在事情发生的当时就被告知。这个包是一个内核，用来在它上面搭框架。它只依赖 Python 标准库。
+引擎运行这张图并照看这次运行：输出要经过检查，用量按预算计数，每次激活都计时，所有事情写入日志，被打断的运行可以接着跑，观察者在事情发生的当时就被告知。这个包是一个内核，用来在它上面搭框架。核心只依赖 Python 标准库。可选的 PostgreSQL 协作服务还需安装 postgres 扩展依赖（psycopg）。
 
 ## 安装
 
@@ -236,9 +236,11 @@ interlacing resume --dir /tmp/run                                               
 
 每一层只使用它下面的层。引擎不认识任何具体的节点、协议或方法，`tests/test_engine.py` 里有一个测试守着这一点。引擎内部由几个各管一件事的小部件组成：图变成的信箱（`wiring`）、节点何时能运行（`scheduler`）、检查什么以及出问题后怎么办（`checks`）、预算（`ledger`）、日志（`recorder`）、时限（`clock`）。
 
-完整说明见 [docs/GRAPH.md](docs/GRAPH.md)（英文版 [docs/GRAPH.en.md](docs/GRAPH.en.md)）。十九个可以直接运行的例子在 [examples/graphs/](examples/graphs/)，写成 JSON 的图在 [examples/data/](examples/data/)。
+完整说明见 [docs/GRAPH.md](docs/GRAPH.md)（英文版 [docs/GRAPH.en.md](docs/GRAPH.en.md)）。二十个可以直接运行的例子在 [examples/graphs/](examples/graphs/)，写成 JSON 的图在 [examples/data/](examples/data/)。
 
 本分支支持 PostgreSQL 多人审核。[协作服务说明](docs/POSTGRES.md)给出了认领、提交和接手续跑的操作示例。[与 LangGraph 的任务对照和检测记录](docs/LANGGRAPH_COMPARISON.md)列出了本地与服务端能运行哪些图，以及哪些能力已有对照实验。
+
+[分支审查报告](docs/BRANCH_REVIEW.md)记录了可复现的问题、测试环境和备份恢复结果。[下一轮实施计划](docs/NEXT_PLAN.md)列出了五项能力及其验收条件。
 
 ## 测试
 
