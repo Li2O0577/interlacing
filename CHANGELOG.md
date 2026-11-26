@@ -4,6 +4,14 @@ Versions before 1.0 may change any interface; each change is listed here. From 1
 by `interlacing` and the formats of graph files, run directories and journals change incompatibly only
 with a new major version.
 
+## 0.16.2
+
+- Inspect recorded dependencies, waits and revisions with `interlacing show` and the MCP `show` tool.
+  The CLI also exports Mermaid and DOT diagrams.
+- On resume, ordinary value corrections can rerun downstream work and update the existing report in place.
+- Recover run directories after the owning process exits unexpectedly on Windows.
+- Add bilingual Python handbooks, a simulation review example and reuse text digests during fan-out.
+
 ## 0.16.0
 
 - Security: `Catalog.function` lets through only functions defined in an allowed module. A name that reaches
