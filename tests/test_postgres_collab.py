@@ -112,6 +112,54 @@ def test_parallel_human_nodes_are_visible_together_and_answers_are_private(servi
     assert lead('status', **run)['result']['outputs'] == {'first': [10], 'second': [20]}
 
 
+def test_invalid_assignment_never_opens_a_task(service):
+    db, lead, alice, bob = service
+    inner = {'nodes': [*REVIEW['nodes'], {'id': 'ordinary', 'kind': 'pass'}],
+             'edges': [{'from': 'ordinary.y', 'to': 'review.request'}],
+             'inputs': {'x': 'ordinary.x'}, 'outputs': REVIEW['outputs']}
+    graph = {'method': 'chain', 'nodes': [{'kind': 'graph', 'id': 'group', 'graph': 'inner'}],
+             'graphs': {'inner': inner}}
+    for key in ('typo', 'group.0/review', 'group.01/review', 'group/review', 'group.1/reveiw',
+                'group.1/ordinary', 'group.1/review.1/extra', 'group'):
+        for action in ('start', 'validate'):
+            with pytest.raises(ValueError) as error:
+                lead(action, graph=graph, assignments={key: 'Alice'})
+            assert repr(key) in str(error.value)
+    with pytest.raises(Refused, match='unknown task assignee'):
+        lead('validate', graph=graph, assignments={'group.1/review': 'unknown'})
+    assert work_one(db, 'idle') is None
+    assert not lead('tasks') and 'run.start' not in {item['action'] for item in lead('audit')}
+    assignments = {'group.1/review': 'Alice'}
+    assert 'assignment_paths' in lead('validate', graph=graph, assignments=assignments)['checked']
+    run = lead('start', graph=graph, inputs={'in': 'private'}, assignments=assignments)
+    assert work_one(db, 'open')['state'] == 'waiting', lead('status', **run)
+    task, = alice('tasks')
+    assert lead('tasks') == [task] and not bob('tasks')
+    with pytest.raises(Refused):
+        bob('claim', task=task['id'], version=task['version'])
+
+
+def test_generated_assignments_checked_before_any_node_runs(service):
+    db, lead, alice, bob = service
+    graph = {'method': 'fan', 'nodes': [{'kind': 'human', 'id': 'review', 'times': 2}]}
+    def start(key):
+        assignment = {key: 'Alice'}
+        checks = lead('validate', graph=graph, assignments=assignment)
+        assert 'assignment_paths' in checks['worker_checks']
+        return lead('start', graph=graph, assignments=assignment, inputs={'in': 'review this'})
+
+    invalid = start('review-3')
+    assert work_one(db, 'check')['state'] == 'failed'
+    assert 'review-3' in lead('status', **invalid)['result']['error']
+    assert lead('history', **invalid) == [] and not lead('tasks')
+    start('review-1')
+    assert work_one(db, 'dispatch')['state'] == 'waiting'
+    tasks = {task['node']: task for task in alice('tasks')}
+    assert tasks['review-1']['assignee'] == 'Alice'
+    assert bob('tasks') == [tasks['review-2']]
+    bob('claim', task=tasks['review-2']['id'], version=tasks['review-2']['version'])
+
+
 def test_old_generation_cannot_write_after_a_process_dies(service):
     db, lead, _, _ = service
     run = lead('start', graph=REVIEW, inputs={'x': 'crash'})

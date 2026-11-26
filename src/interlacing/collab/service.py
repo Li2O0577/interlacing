@@ -136,14 +136,19 @@ class Collaboration:
         return value
 
     @staticmethod
-    def validate(db, actor, graph, workers=4):
-        return validate_submission(graph, workers)
+    def validate(db, actor, graph, workers=4, assignments=None):
+        result = validate_submission(graph, workers, assignments)
+        for member in set((assignments or {}).values()):
+            if not db.execute("SELECT 1 FROM il_members WHERE project=%s AND name=%s",
+                              (actor["project"], member)).fetchone():
+                raise Refused("unknown task assignee")
+        return result
 
     def start(self, db, actor, graph, inputs=None, resources=None, assignments=None, workers=4):
         if not isinstance(graph, dict) or any(value is not None and not isinstance(value, dict)
                                                for value in (inputs, resources, assignments)):
             raise ValueError("graph, inputs, resources and assignments must be objects")
-        validate_submission(graph, workers)
+        self.validate(db, actor, graph, workers, assignments)
         inputs = dict(inputs or {})
         resources = resources or {}
         for port, ref in resources.items():
@@ -152,10 +157,6 @@ class Collaboration:
             item = self._resource(db, actor, **ref)
             inputs[port] = item["data"] if "data" in item else item
         assignments = assignments or {}
-        for member in set(assignments.values()):
-            if not db.execute("SELECT 1 FROM il_members WHERE project=%s AND name=%s",
-                              (actor["project"], member)).fetchone():
-                raise Refused("unknown task assignee")
         run = str(uuid4())
         db.execute("INSERT INTO il_runs(id,project,graph,inputs,resources,assignments,workers) VALUES (%s,%s,%s,%s,%s,%s,%s)",
                    (run, actor["project"], encoded(graph), encoded(inputs), encoded(resources), encoded(assignments), workers))

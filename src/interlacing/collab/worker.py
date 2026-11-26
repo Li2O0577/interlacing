@@ -14,6 +14,7 @@ from ..runs import models_from_environment
 from ..spec import Catalog, load, load_node
 from .database import Database, Lease, LostLease, PostgresJournal, Refused, encoded
 from .service import audit
+from .validation import check_compiled_assignments
 
 
 class RunStore(Store):
@@ -55,7 +56,8 @@ def _bind_task(db, lease, task, node, turn):
 def execute(database: Database, lease: Lease, *, seconds=30, allow=(), models=None):
     """Drive the command until it finishes or waits. Reclaim after a worker exits via Database.claim."""
     with database.fenced(lease) as db:
-        run = db.execute("SELECT graph,inputs,project,assignments,workers FROM il_runs WHERE id=%s", (lease.run,)).fetchone()
+        run = db.execute("SELECT graph,inputs,project,assignments,workers,description IS NULL AS first_load "
+                         "FROM il_runs WHERE id=%s", (lease.run,)).fetchone()
 
     def ask(node, turn, request, schema):
         with database.fenced(lease) as db:
@@ -108,6 +110,8 @@ def execute(database: Database, lease: Lease, *, seconds=30, allow=(), models=No
             catalog = Catalog(allow=allow, models=models, ask_typed=ask, max_workers=0,
                               protocols=standard(RunStore(database, lease, run["project"])))
             graph = load(run["graph"], catalog)
+            if run["first_load"]:
+                check_compiled_assignments(graph, run["assignments"])
             with database.fenced(lease) as db:
                 db.execute("UPDATE il_runs SET description=%s WHERE id=%s AND description IS NULL",
                            (encoded(graph.describe()), lease.run))
