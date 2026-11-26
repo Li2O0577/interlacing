@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Generator, Iterable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
 from .journal import JournalError
+
+_RETAINED_CHECKPOINTS = 16
+_LAST_POSITION = (1 << 63) - 1
 
 
 class SQLiteJournal:
@@ -36,7 +39,7 @@ class SQLiteJournal:
 
     def _version(self, connection: sqlite3.Connection) -> int:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in (0, 1, 2):
+        if version not in (0, 1, 2, 3):
             raise JournalError(f"{self.path}: unsupported SQLite journal version {version}")
         return version
 
@@ -63,22 +66,27 @@ class SQLiteJournal:
                         "seq INTEGER NOT NULL, record TEXT NOT NULL, PRIMARY KEY (scope, seq))"
                     )
                     connection.execute("PRAGMA user_version = 1")
-                if version < 2 and self.durable:
+                if version < 3 and self.durable:
                     connection.execute(
-                        "CREATE TABLE checkpoints (scope TEXT PRIMARY KEY REFERENCES runs(scope) ON DELETE CASCADE, "
-                        "seq INTEGER NOT NULL, state TEXT NOT NULL)"
+                        "CREATE TABLE retained_checkpoints (scope TEXT NOT NULL REFERENCES runs(scope) ON DELETE CASCADE, "
+                        "seq INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY (scope, seq))"
                     )
-                    connection.execute("PRAGMA user_version = 2")
+                    if version == 2:
+                        connection.execute("INSERT INTO retained_checkpoints SELECT scope, seq, state FROM checkpoints")
+                        connection.execute("DROP TABLE checkpoints")
+                    connection.execute("ALTER TABLE retained_checkpoints RENAME TO checkpoints")
+                    connection.execute("PRAGMA user_version = 3")
                 yield connection
 
-    def inspect(self) -> Iterator[dict]:
+    def inspect(self, *, through: int = _LAST_POSITION) -> Generator[dict, None, None]:
         """Read an ordered SQLite snapshot without opening a write transaction."""
         if not self.path.exists():
             return
         with self._connection() as connection:
             if self._version(connection) == 0:
                 return
-            rows = connection.execute("SELECT seq, record FROM run_events WHERE scope = ? ORDER BY seq", (self._key,))
+            rows = connection.execute("SELECT seq, record FROM run_events WHERE scope = ? AND seq <= ? ORDER BY seq",
+                                      (self._key, through))
             for seq, record in rows:
                 try:
                     yield json.loads(record)
@@ -96,19 +104,44 @@ class SQLiteJournal:
                 return False
             return connection.execute("SELECT 1 FROM run_events WHERE scope = ? LIMIT 1", (self._key,)).fetchone() is not None
 
-    def recovery(self) -> tuple[dict | None, list[dict]]:
-        """Read the latest recovery state and later events from one SQLite snapshot."""
+    def _tail(self, connection: sqlite3.Connection) -> int:
+        return connection.execute("SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE scope = ?",
+                                  (self._key,)).fetchone()[0]
+
+    def positions(self) -> tuple[int, list[int]]:
+        """Return the last event and retained recovery positions from one read snapshot."""
+        if not self.path.exists():
+            return 0, []
         with self._connection() as connection:
             connection.execute("BEGIN")
             version = self._version(connection)
             if not version:
+                return 0, []
+            positions = []
+            if version >= 2:
+                rows = connection.execute("SELECT seq FROM checkpoints WHERE scope = ? ORDER BY seq", (self._key,))
+                positions = [seq for seq, in rows]
+            return self._tail(connection), positions
+
+    def recovery(self, *, at: int | None = None) -> tuple[dict | None, list[dict]]:
+        """Read the latest recovery state and later events from one SQLite snapshot."""
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            version = self._version(connection)
+            if at is not None:
+                tail = self._tail(connection) if version else 0
+                if type(at) is not int or not 1 <= at <= tail:
+                    raise JournalError(f"{self.path}: event position must be between 1 and {tail}, got {at!r}")
+            if not version:
                 return None, []
+            through = _LAST_POSITION if at is None else at
             row = None
             if version >= 2:
-                row = connection.execute("SELECT seq, state FROM checkpoints WHERE scope = ?", (self._key,)).fetchone()
+                row = connection.execute("SELECT seq, state FROM checkpoints WHERE scope = ? AND seq <= ? "
+                                         "ORDER BY seq DESC LIMIT 1", (self._key, through)).fetchone()
             seq, state = row if row is not None else (0, None)
-            records = connection.execute("SELECT record FROM run_events WHERE scope = ? AND seq > ? ORDER BY seq",
-                                         (self._key, seq))
+            records = connection.execute("SELECT record FROM run_events WHERE scope = ? AND seq > ? AND seq <= ? ORDER BY seq",
+                                         (self._key, seq, through))
             try:
                 checkpoint = json.loads(state) if state is not None else None
                 if checkpoint is not None and checkpoint.get("seq") != seq:
@@ -120,12 +153,26 @@ class SQLiteJournal:
     def checkpoint(self, state: dict) -> None:
         payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         with self._transaction() as connection:
-            tail = connection.execute("SELECT MAX(seq) FROM run_events WHERE scope = ?", (self._key,)).fetchone()[0]
+            tail = self._tail(connection)
             if tail != state["seq"]:
                 raise JournalError(f"{self.path}: journal advanced while saving its checkpoint")
             connection.execute("INSERT INTO checkpoints (scope, seq, state) VALUES (?, ?, ?) "
-                               "ON CONFLICT(scope) DO UPDATE SET seq = excluded.seq, state = excluded.state",
+                               "ON CONFLICT(scope, seq) DO UPDATE SET state = excluded.state",
                                (self._key, tail, payload))
+            connection.execute("DELETE FROM checkpoints WHERE scope = ? AND seq IN ("
+                               "SELECT seq FROM checkpoints WHERE scope = ? ORDER BY seq DESC LIMIT -1 OFFSET ?)",
+                               (self._key, self._key, _RETAINED_CHECKPOINTS))
+
+    def seed(self, records: Iterable[dict]) -> None:
+        """Write copied events into an empty root journal as one transaction."""
+        if self._scope:
+            raise JournalError("only a root journal can be seeded")
+        with self._transaction() as connection:
+            connection.execute("INSERT INTO runs (scope, parent) VALUES (?, NULL)", (self._key,))
+            connection.executemany("INSERT INTO run_events (scope, seq, record) VALUES (?, ?, ?)",
+                                   ((self._key, seq, json.dumps(record, ensure_ascii=False, separators=(",", ":"),
+                                                               allow_nan=False))
+                                    for seq, record in enumerate(records, 1)))
 
     def write(self, record: dict) -> None:
         payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"), allow_nan=False)

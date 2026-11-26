@@ -131,9 +131,19 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--budget", **budget)
     show = commands.add_parser("show", help="inspect recorded dependencies, events and topology")
     show.add_argument("--dir", required=True)
+    show.add_argument("--at", type=int, metavar="EVENT", help="view a committed event position in a durable SQLite run")
     style = show.add_mutually_exclusive_group()
     style.add_argument("--timeline", action="store_true", help="include events in journal order")
     style.add_argument("--format", choices=["json", "dot", "mermaid"], default="json")
+    checkpoints = commands.add_parser("checkpoints", help="list durable SQLite recovery positions")
+    checkpoints.add_argument("--dir", required=True)
+    fork = commands.add_parser("fork", help="copy a durable SQLite run from a settled event position")
+    fork.add_argument("--dir", required=True, help="the source run directory")
+    fork.add_argument("--to", required=True, help="a new run directory")
+    fork.add_argument("--at", required=True, type=int, metavar="EVENT")
+    fork.add_argument("--input", action="append", metavar="NAME=VALUE", help="replace an unconsumed graph input")
+    fork.add_argument("--inputs", metavar="FILE", help="a JSON file of replacement graph inputs")
+    fork.add_argument("--execute", action="store_true", help="allow the fork to run node code when resumed")
     commands.add_parser("status", help="say where a run stands").add_argument("--dir", required=True)
     control = commands.add_parser("control", help="pause, resume, stop or restart nodes of a run")
     control.add_argument("action", choices=["pause", "resume", "stop", "restart"])
@@ -233,7 +243,12 @@ def main(argv=None, out=None) -> int:
             elif args.command == "control":
                 state = Run(args.dir).control(args.nodes, args.action, team=args.team)
             elif args.command == "show":
-                state = Run(args.dir).show(timeline=args.timeline)
+                state = Run(args.dir).show(timeline=args.timeline, at=args.at)
+            elif args.command == "checkpoints":
+                state = Run(args.dir).checkpoints()
+            elif args.command == "fork":
+                fork = Run(args.dir).fork(args.to, at=args.at, inputs=_inputs(args), execute=args.execute)
+                state = {"directory": str(fork.directory), **fork.checkpoints()}
             elif args.command == "files":
                 state = {"files": Run(args.dir).files()}
             else:

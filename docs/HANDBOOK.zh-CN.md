@@ -183,6 +183,17 @@ interlacing resume --dir demo-run
 
 该模式支持普通值与内容引用、启动时绑定输入、追加式改图，以及暂停、停止与继续。流、调用、质疑、消息修正、运行中接收、节点重启和替换图恢复使用标准模式。持久化投递为图内消息去重，未完成节点的代码仍可能重试。外部服务支持幂等键时，应为写操作使用稳定的键。
 
+**查看历史与创建分叉。** 对已经启动的持久化 SQLite 运行执行以下命令。事件 `1` 是接收初始输入的位置。`checkpoints` 列出最近保留的 16 个恢复快照，任何已提交的事件仍可用 `show --at` 查看，包括图版本、输出值和执行到一半的节点。
+
+```console
+$ interlacing checkpoints --dir source-run
+$ interlacing show --dir source-run --at 1 --timeline
+$ interlacing fork --dir source-run --to variant-run --at 1 --input in=42 --execute
+$ interlacing resume --dir variant-run
+```
+
+`fork` 需要一个新目录和当时没有未完成激活的事件。可更换该位置尚未消费的图输入，在事件 `1` 也可提供原先遗漏的图输入。分叉有独立日志、运行编号和工作区，并记录父运行及事件。工作区文件和人工问答没有历史快照。省略 `--execute` 时分叉只供查看。显式选择 `--execute` 后，`resume` 会按照继承的运行权限执行节点，节点可以产生外部副作用。Python 调用对应 `Run.checkpoints()`、`Run.show(at=...)` 和 `Run.fork(..., at=..., inputs=..., execute=True)`。
+
 用 `interlacing show --dir demo-run` 可以按输入端口查看已记录的投递。等待审批时，`publish.note` 已收到来自 `draft.note` 的投递，`publish.verdict` 还在等 `editor.answer` 的首次投递记录。命令仅读取保存的图和完整日志行，无需加载节点代码。正在运行时展示的也是已落盘的证据。图中的增删节点与接线会根据已提交的变更重建。
 
 加 `--timeline` 按日志顺序看激活轮次、质疑与答复、节点开关和上报用量。新日志的 `elapsed_seconds` 是本次激活记录片段的墙钟耗时（包括等待）；旧记录没有耗时字段。失败运行另有 `failure`。用 `--format mermaid` 或 `--format dot` 导出节点与端口连线。若外部替换图只留下摘要，输出会标明最后已知拓扑。[模拟结果的两种审查路径](../examples/graphs/simulation_review.py)

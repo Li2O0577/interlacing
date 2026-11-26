@@ -67,7 +67,7 @@ class Recorder:
         if self.durable is not None:
             self.durable.apply(record)
             assert isinstance(self.journal, SQLiteJournal)
-            if self.durable.seq % self.journal.checkpoint_every == 0:
+            if self.durable.seq == 1 or self.durable.seq % self.journal.checkpoint_every == 0:
                 self.journal.checkpoint(self.durable.data)
 
     def run(self, id: str, graph: str, sent: list[Envelope]) -> None:

@@ -46,11 +46,17 @@ class DurableState:
         data = self.data
         kind = record["kind"]
         data["seq"] += 1
-        data["ended"] = kind == "end"
+        if kind != "fork" or record["sent"]:
+            data["ended"] = kind == "end"
         if kind == "run":
             if record.get("durable") is not True:
                 raise NodeError("this journal was created without durable delivery")
             data["run"] = {key: record[key] for key in ("id", "graph")}
+            self._deliver(record["sent"])
+        elif kind == "fork":
+            for packed in record["sent"]:
+                if len(packed) > 5:
+                    del data["mail"][packed[5]]
             self._deliver(record["sent"])
         elif kind == "bind":
             node = record["node"]

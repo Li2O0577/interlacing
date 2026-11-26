@@ -181,6 +181,17 @@ For a new run, add `--journal sqlite` to store its execution history in `journal
 
 Add `--durable` with `--journal sqlite` on `run` or `serve` to commit each delivery before its receiver can start. The runtime records actual input deliveries before node code runs. Recovery loads a periodic checkpoint and the later events. An unfinished node can replay with its original inputs. A matching operation reuses its committed delivery and publishes nothing again. Replay that produces a different value or different graph edit fails. Explicit progress uses `ctx.commit()`, `snapshot/restore` and `ctx.resumed`. Python code opts in with `SQLiteJournal(path, durable=True)`.
 
+**View history and fork a run.** The following commands apply to a started durable SQLite run. Event `1` records the initial inputs. `checkpoints` lists up to 16 retained recovery snapshots. `show --at` can still inspect any committed event position, including the graph version, output values and unfinished activations at that position.
+
+```console
+$ interlacing checkpoints --dir source-run
+$ interlacing show --dir source-run --at 1 --timeline
+$ interlacing fork --dir source-run --to variant-run --at 1 --input in=42 --execute
+$ interlacing resume --dir variant-run
+```
+
+Fork at a position where all activations have settled and choose a new directory. You can replace unconsumed graph inputs and supply inputs omitted at event `1`. Each fork has its own journal, run ID and workspace, with a reference to the parent run and event. Workspace files and human questions and answers are outside the historical snapshot. A fork defaults to inspection only. With `--execute`, `resume` runs nodes with the inherited capabilities, so they can produce external side effects. Python callers can use `Run.checkpoints()`, `Run.show(at=...)` and `Run.fork(..., at=..., inputs=..., execute=True)`.
+
 This mode supports value and artifact edges, activation-start input binding, additive graph edits and pause, stop and resume. Choose the standard mode for streams, calls, challenges, message correction, mid-activation receive, node restart or replacing the graph on resume. For external effects, use provider idempotency keys where available. Durable delivery deduplicates graph messages; an interrupted user function can still run again.
 
 Use `interlacing show --dir demo-run` to inspect recorded deliveries by input port. While the run waits for approval, `publish.note` has a delivery from `draft.note` and `publish.verdict` awaits the first recorded delivery from `editor.answer`. The command reads the saved graph and complete journal lines without loading node code. It reports historical evidence even for a running process. Committed additions, removals and wiring changes reconstruct the recorded graph.

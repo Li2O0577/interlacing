@@ -141,6 +141,9 @@ def explain_records(graph: dict, records: Iterable[dict], status: str, questions
                                             for name, index, _ in record["fixed_out"]]
             if kind == "bind":
                 event["took"] = record["took"]
+            if kind == "fork":
+                event["origin"] = record["origin"]
+                event["inputs"] = [item[0].removeprefix(INPUT) for item in record["sent"]]
             if kind == "topology":
                 event["operations"] = [op[0] for op in record["operations"]]
             elif record.get("changes"):
@@ -152,7 +155,7 @@ def explain_records(graph: dict, records: Iterable[dict], status: str, questions
                 break
             _apply(ops, descriptions, edges, inputs_map, outputs, sent, activated, managers)
             changed = True
-        if kind in ("run", "act", "deliver"):
+        if kind in ("run", "fork", "act", "deliver"):
             sent.update(envelope[0] for envelope in record.get("sent", ()))
         if kind == "act":
             activated.add(record["node"])

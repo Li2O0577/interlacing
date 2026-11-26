@@ -180,7 +180,7 @@ def history_record(record: dict, seq: int) -> dict:
     event = {"seq": seq, "kind": kind, "schema_version": record.get("schema_version", 0)}
     if kind == "run":
         event.update(run_id=record.get("id"), scope_id=record.get("scope_id"))
-    if kind in ("run", "act", "deliver"):
+    if kind in ("run", "fork", "act", "deliver"):
         event["deliveries"] = [
             [f"{item[0]}#{item[1]}", item[5] if len(item) > 5 else None]
             for item in record.get("sent", ())

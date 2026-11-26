@@ -25,17 +25,24 @@ from the journal. Nothing that had finished runs again.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
+import shutil
 import socket
 import sys
 import threading
 import time
+from itertools import chain
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .base import GraphError
+from .base import GraphError, canonical
 from .engine import Engine, Journal, RunError, SQLiteJournal
+from .engine.durable import DurableState
+from .engine.journal import pack_body
+from .engine.wiring import INPUT
 from .nodes import Workspace
 from .models import ChatResult, FakeProvider, ProviderError, build
 from .spec import Catalog, SpecError, dump, load, load_node
@@ -301,6 +308,7 @@ class Run:
         """Run from the beginning until the run is done, needs a person, or fails. Returns the state."""
         self._held()
         with _Lock(self.directory):
+            self._require_execution()
             if self._journal().path.exists():
                 raise SpecError(f"{self.directory} has already been started: resume it")
             try:
@@ -314,6 +322,7 @@ class Run:
         over its budget goes on under a larger one."""
         self._held()
         with _Lock(self.directory):
+            self._require_execution()
             journal = self._journal()
             if not journal.path.exists():
                 raise SpecError(f"{self.directory} has not been started")
@@ -325,6 +334,11 @@ class Run:
     def _held(self) -> None:
         if not (self.directory / "graph.json").exists():
             raise SpecError(f"{self.directory} holds no run")
+
+    def _require_execution(self) -> None:
+        fork = _read(self.directory / "options.json", {}).get("fork")
+        if fork and not fork["executable"]:
+            raise SpecError("this fork is for inspection; create an executable fork to run or control it")
 
     def _go(self, action, budget: Mapping[str, float] | None = None) -> dict:
         """Run the engine and its control watcher while the caller holds the directory lock."""
@@ -370,6 +384,7 @@ class Run:
             changed = engine.control(nodes, action, team=team)
             return {"status": RUNNING, "changed": changed, "switches": self.switches()}
         self._held()
+        self._require_execution()
         from .engine.recorder import Recorder, SWITCHED
         if action not in SWITCHED:
             raise SpecError(f"no action {action!r}: one of {', '.join(SWITCHED)}")
@@ -491,18 +506,134 @@ class Run:
         _write(self.directory / "state.json", state)
         return {**state, "questions": self.questions()}
 
-    def show(self, *, timeline: bool = False) -> dict:
+    def _history_journal(self) -> SQLiteJournal:
+        self._held()
+        journal = self._journal()
+        if not isinstance(journal, SQLiteJournal) or not journal.durable:
+            raise SpecError("historical positions require a durable SQLite run")
+        return journal
+
+    def checkpoints(self) -> dict:
+        """List retained recovery positions and the last committed root event."""
+        last, positions = self._history_journal().positions()
+        return {"last_event": last, "checkpoints": positions}
+
+    @staticmethod
+    def _history_at(journal: SQLiteJournal, at: int) -> tuple[int | None, DurableState]:
+        if type(at) is not int:
+            raise SpecError("an event position must be an integer")
+        if not journal.path.exists():
+            raise SpecError("the run has no committed events")
+        checkpoint, records = journal.recovery(at=at)
+        position = checkpoint["seq"] if checkpoint is not None else None
+        state = DurableState(checkpoint)
+        for record in records:
+            state.apply(record)
+        return position, state
+
+    def fork(self, directory, *, at: int, inputs: Mapping[str, Any] | None = None,
+             execute: bool = False) -> Run:
+        """Copy a settled root position into a new run. Only an executable fork may be resumed."""
+        journal = self._history_journal()
+        _, state = self._history_at(journal, at)
+        if state.pending:
+            raise SpecError(f"cannot fork at event {at}: unfinished activations: {', '.join(sorted(state.pending))}")
+        graph = _read(self.directory / "graph.json")
+        overrides = self._fork_inputs(graph, state, inputs or {})
+        target = type(self)(directory, models=self.models, observe=self.observe)
+        location = target.directory.resolve()
+        options = _read(self.directory / "options.json")
+        if location.is_relative_to(self.directory.resolve()) or location.is_relative_to(self.workspace(options).resolve()):
+            raise SpecError("a fork needs its own directory outside the source run and its workspace")
+        try:
+            target.directory.mkdir(parents=True)
+        except FileExistsError:
+            raise SpecError(f"{target.directory} already exists") from None
+        records = journal.inspect(through=at)
+        try:
+            with _Lock(target.directory):
+                root = next(records)
+                origin = {"run_id": root["id"], "scope_id": root["scope_id"], "event": at}
+                options.update(workspace=None, fork={"origin": origin, "executable": bool(execute)})
+                header = {**root, "id": secrets.token_hex(8), "scope_id": secrets.token_hex(16)}
+                branch = {"schema_version": 1, "kind": "fork", "origin": origin, "sent": overrides}
+                saved_inputs = {}
+
+                def prefix():
+                    for record in chain([header], records, [branch]):
+                        if record["kind"] in ("run", "fork"):
+                            for edge, _, _, body, *_ in record["sent"]:
+                                saved_inputs[edge.removeprefix(INPUT)] = body[1]
+                        yield record
+
+                target_journal = SQLiteJournal(target.directory / journal.path.name, durable=True)
+                target_journal.seed(prefix())
+                state.data["run"]["id"] = header["id"]
+                state.apply(branch)
+                target_journal.checkpoint(state.data)
+                _write(target.directory / "options.json", options)
+                _write(target.directory / "inputs.json", saved_inputs)
+                target.workspace(options).mkdir()
+                target._state(STOPPED, graph=graph["digest"])
+                _write(target.directory / "graph.json", graph)
+        except BaseException:
+            shutil.rmtree(target.directory, ignore_errors=True)
+            raise
+        finally:
+            records.close()
+        return target
+
+    @staticmethod
+    def _fork_inputs(graph: dict, state: DurableState, inputs: Mapping[str, Any]) -> list:
+        from .spec.kinds import schema_of
+        nodes = {node["id"]: node for node in graph["nodes"]}
+        overrides = []
+        for name, value in inputs.items():
+            if name not in graph["inputs"]:
+                raise SpecError(f"the graph has no input {name!r}")
+            edge = INPUT + name
+            sent = state.data["counters"].get(edge, 0)
+            previous = f"{edge}#{sent}"
+            if previous not in state.data["mail"] and state.seq != 1:
+                raise SpecError(f"graph input {name!r} is no longer available to override at this position")
+            node, _, port = graph["inputs"][name].rpartition(".")
+            described = next(item for item in nodes[node]["inputs"] if item["name"] == port)
+            try:
+                schema_of(described.get("schema")).check(value)
+                json.dumps(value, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise SpecError(f"graph input {name}: {exc}") from None
+            overrides.append([edge, sent + 1, 0, pack_body(value), [], *([previous] if sent else [])])
+        return overrides
+
+    def show(self, *, timeline: bool = False, at: int | None = None) -> dict:
         """Inspect the saved graph and journal without constructing or running nodes."""
         from .inspection import explain_records
         self._held()
+        graph = _read(self.directory / "graph.json")
+        options = _read(self.directory / "options.json", {})
+        metadata = {"fork": options["fork"]} if "fork" in options else {}
+        if at is not None:
+            journal = self._history_journal()
+            checkpoint, history = self._history_at(journal, at)
+            data = history.data
+            changes = data["changes"]
+            graph_version = hashlib.sha256(canonical([graph["digest"], changes]).encode("utf-8")).hexdigest()
+            view = explain_records(graph, journal.inspect(through=at), "historical", [], timeline=timeline)
+            return {**view, **metadata, "event": at, "checkpoint": checkpoint,
+                    "graph_version": {"digest": graph_version, "changes": len(changes)},
+                    "values": {name: [body[1] if body[0] == "v" else
+                                      {"digest": body[1], "size": body[2], "media": body[3]} for body in bodies]
+                               for name, bodies in data["outputs"].items()},
+                    "pending": {node: {"round": item["round"], "took": item["took"]}
+                                for node, item in history.pending.items()},
+                    "forkable": not history.pending, "ended": data["ended"]}
         state = _read(self.directory / "state.json", {})
         status = RUNNING if _holder(self.directory) else state.get("status", NEW)
-        records = self._journal().inspect()
-        view = explain_records(_read(self.directory / "graph.json"), records,
-                               status, self.questions(), timeline=timeline)
+        view = explain_records(graph, self._journal(options).inspect(), status, self.questions(), timeline=timeline)
         if status == FAILED:
             view["failure"] = {k: state[k] for k in ("node", "error") if k in state}
-        return view
+        return {**view, **metadata}
 
     def status(self) -> dict:
         state = _read(self.directory / "state.json")
