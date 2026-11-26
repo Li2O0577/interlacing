@@ -1,6 +1,6 @@
 # interlacing · Python user and maintainer guide
 
-[中文](HANDBOOK.zh-CN.md) · **English** · For **0.16.0**, Python 3.11+. Start with the first two examples if you are new. If you inherited a graph, start with the maintainer map at the end.
+[中文](HANDBOOK.zh-CN.md) · **English** · For **0.16.2**, Python 3.11+. Start with the first two examples if you are new. If you inherited a graph, start with the maintainer map at the end.
 
 [Quick start](#start) · [Graphs and ordering](#graph) · [Edge protocols](#edges) · [Choosing nodes](#nodes) · [Composition](#compose) · [Execution and recovery](#run) · [Challenges and corrections](#review) · [JSON, CLI and MCP](#cli) · [Maintenance and troubleshooting](#maintain)
 
@@ -11,7 +11,7 @@
 An experiment produces three readings. Compute their range and turn it into a sentence. Save the Python block below as a script and run it locally. Install the release with:
 
 ```sh
-python -m pip install interlacing==0.16.0
+python -m pip install interlacing==0.16.2
 ```
 
 ```python
@@ -146,7 +146,7 @@ A **method** is a reusable wiring pattern. Use `Chain(a, b)` for sequential work
 
 ## 7 · Who handles a questionable result?
 
-| What happened | Who decides | Behavior in 0.16.0 |
+| What happened | Who decides | Behavior in 0.16.2 |
 |---|---|---|
 | A produces a structurally invalid output | Output port | `Port("score", check=validate, repairs=1)` can trigger repair, warning or failure according to its settings |
 | B1 has evidence that A’s simulation result is wrong | B1 raises the question; A answers | Enable challenges with `connect(..., challenges=N)`. B1 calls `ctx.reject(port, reason)` and waits; specify `which` for multiple senders. A explains or corrects. Ordinary nodes can implement `challenged(ctx, rejection)` |

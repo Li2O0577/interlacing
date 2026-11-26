@@ -1,6 +1,6 @@
 # interlacing · Python 使用与维护手册
 
-**中文** · [English](HANDBOOK.en.md) · 适用版本 **0.16.0**，Python 3.11+。第一次使用，先做前两个例子；接手一个已有项目，直接查最后的维护地图。
+**中文** · [English](HANDBOOK.en.md) · 适用版本 **0.16.2**，Python 3.11+。第一次使用，先做前两个例子；接手一个已有项目，直接查最后的维护地图。
 
 [快速开始](#start) · [建图与顺序](#graph) · [协议选择](#edges) · [节点选择](#nodes) · [组合与动态结构](#compose) · [运行与恢复](#run) · [质疑与更正](#review) · [JSON、CLI 与 MCP](#cli) · [维护与排错](#maintain)
 
@@ -11,7 +11,7 @@
 一个实验产生三个读数。我们要计算读数的跨度，并把它写成一句话。把下面的 Python 代码保存为脚本执行即可；本节全部在本地运行。安装发布版：
 
 ```sh
-python -m pip install interlacing==0.16.0
+python -m pip install interlacing==0.16.2
 ```
 
 ```python
@@ -146,7 +146,7 @@ assert run(agent, {"task": "Check availability"}).last("out") == "ready"
 
 ## 7 · 输出不对时，谁来处理？
 
-| 发生了什么 | 谁做决定 | 0.16.0 的行为 |
+| 发生了什么 | 谁做决定 | 0.16.2 的行为 |
 |---|---|---|
 | A 发出前就发现产物格式不合规 | 输出端口 | `Port("score", check=validate, repairs=1)` 按配置尝试修复、警告或失败 |
 | B1 结合其他证据怀疑 A 的模拟结果 | B1 主动提问，A 答复 | 边用 `connect(..., challenges=N)` 允许质疑。B1 调 `ctx.reject(port, reason)` 等答复；多来源时可用 `which` 指定发送者。A 解释或更正，普通节点也能实现 `challenged(ctx, rejection)` |
