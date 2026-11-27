@@ -4,7 +4,7 @@ A node is anything that takes information in and gives information out: a model,
 program, a device, a person, another graph. An edge carries information from one node to another under a
 written protocol. A method is a reusable way of joining nodes: a chain, a loop, a fan, a tree.
 
-Layers, bottom up (each imports only from below):
+Package layout:
 
 1. base        Node, Port, Schema, Edge, Protocol, Envelope, Graph, GraphBuilder, Method
 2. engine      Engine, Result, Journal, Transport
@@ -14,8 +14,12 @@ Layers, bottom up (each imports only from below):
 5. runs, cli, serve   a run kept in a directory, the ``interlacing`` command that works on one, and the
                same operations offered to an MCP client
    quick       ``run``: build and run in one step
+   collab      HTTP client, task service and workers for shared PostgreSQL projects
 
-Public names are importable from the package root. Standard library only.
+Start a Python graph with ``from interlacing import Chain, run``. Reopen a local run directory
+with ``from interlacing.runs import Run``. For shared tasks, import ``Client`` from
+``interlacing.collab.client``. The core and client use the standard library. The PostgreSQL
+service and workers also need the postgres extra.
 """
 
 __version__ = "0.17.0"

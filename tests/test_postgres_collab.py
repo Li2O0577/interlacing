@@ -1,8 +1,11 @@
 """Integration contracts for the service. Set INTERLACING_TEST_POSTGRES to a disposable PostgreSQL database."""
 import base64
+import doctest
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -905,3 +908,42 @@ def test_nested_experts_share_one_run_budget(service, monkeypatch, workers, expe
     run = lead('start', graph=graph, workers=workers)
     assert work_one(db, 'worker', allow=[__name__])['state'] == 'done', lead('status', **run)
     assert (completed, peak) == (6, expected)
+
+def test_handbook_editor_handoff(service, monkeypatch):
+    from interlacing.collab.client import Client
+
+    root = Path(__file__).resolve().parents[1]
+    snippets = []
+    for language in ("en", "zh-CN"):
+        handbook = (root / "docs" / f"HANDBOOK.{language}.md").read_text(encoding="utf-8")
+        section = handbook.split('<a id="collaborate">')[1].split('<a id="extend">')[0]
+        snippets.append(re.findall(r"^```pycon\n(.*?)\n```$", section, re.M | re.S))
+    assert snippets[0] == snippets[1]
+    submit, inspect = snippets[0]
+    database, _, _, _ = service
+    manager = Collaboration(database).bootstrap(str(uuid4()), "lead")["token"]
+    monkeypatch.setenv("MANAGER_TOKEN", manager)
+    monkeypatch.chdir(root / "examples" / "data")
+    monkeypatch.syspath_prepend(str(Path.cwd()))
+
+    with server(database, 0) as http:
+        url = f"http://127.0.0.1:{http.server_port}"
+        monkeypatch.setenv("INTERLACING_URL", url)
+        thread = threading.Thread(target=http.serve_forever)
+        thread.start()
+        try:
+            def approve(token):
+                assert work_one(database, "writer", allow=["steps"])["state"] == "waiting"
+                editor = Client(url, token)
+                task, = editor.request("tasks")
+                assert task["assignee"] == "Alice" and task["request"] == "A note about tides."
+                editor.request("submit", task=task["id"], version=task["version"], answer={"approved": True})
+                assert work_one(database, "publisher", allow=["steps"])["state"] == "done"
+
+            transcript = submit + '\n>>> approve(reviewer["token"])\n' + inspect
+            test = doctest.DocTestParser().get_doctest(transcript, {"approve": approve},
+                                                       "handbook editor handoff", str(root), 0)
+            assert doctest.DocTestRunner().run(test).failed == 0
+        finally:
+            http.shutdown()
+            thread.join()

@@ -27,7 +27,7 @@ postgres = ["psycopg[binary]>=3.1,<4"]
 
 [project.urls]
 Homepage = "https://github.com/Li2O0577/interlacing"
-Documentation = "https://github.com/Li2O0577/interlacing/blob/main/docs/GRAPH.en.md"
+Documentation = "https://github.com/Li2O0577/interlacing/blob/main/docs/HANDBOOK.en.md"
 Changelog = "https://github.com/Li2O0577/interlacing/blob/main/CHANGELOG.md"
 Issues = "https://github.com/Li2O0577/interlacing/issues"
 

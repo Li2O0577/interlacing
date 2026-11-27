@@ -1,6 +1,8 @@
 # interlacing · Python 使用与维护手册
 
-**中文** · [English](HANDBOOK.en.md) · 需要 Python 3.11+。本地 JSONL 和 SQLite 运行只需安装核心包。使用 PostgreSQL 协作服务时，执行 `python -m pip install "interlacing[postgres]==0.17.0"`。第一次使用，先做前两个例子。接手已有项目，可以从最后的维护地图读起。
+**中文** · [English](HANDBOOK.en.md) · 需要 Python 3.11+。本地 JSONL 和 SQLite 工作流只需核心包。要跑本手册的浏览器审核练习，请从当前仓库安装并启用 `postgres` 扩展依赖。[各版本变更](../CHANGELOG.md)
+
+**按任务开始。** [第一张图](#start) · [保存和恢复](#run) · [把审核交给同事](#collaborate) · [自定义节点](#extend)
 
 [快速开始](#start) · [建图与顺序](#graph) · [协议选择](#edges) · [节点选择](#nodes) · [组合与动态结构](#compose) · [运行与恢复](#run) · [质疑与更正](#review) · [JSON、CLI 与 MCP](#cli) · [维护与排错](#maintain)
 
@@ -131,12 +133,28 @@ assert run(agent, {"task": "Check availability"}).last("out") == "ready"
 
 ## 6 · 执行、观测和恢复
 
-| 入口 | 什么时候用 | 要看什么 |
+| 选择 | 从哪里导入 | 什么时候用 |
 |---|---|---|
-| `run(thing, inputs, **options)` | 脚本或测试中直接运行函数、节点、方法或图 | 返回 `Result`；看 `outputs`、`last(name)`、`complete` |
-| `Engine(graph, ...).run(inputs)` | 需要指定调度、预算、日志、观察器 | `workers` 控制并行工作线程，`time_limit` 约束单次激活，`budget` 按节点报告的用量累计，`observe` 接收事件；协程入口为 `await engine.arun(inputs)` |
-| `Engine(..., journal=Journal(path)).resume()` | 应用自己管理图对象和日志，进程重启后接续 | 新引擎加载同一图和同一日志；`Journal(path, sync=True)` 会在每次写记录时额外执行磁盘同步 |
-| `interlacing.runs.Run` | 多个进程交接同一份运行目录，典型情况是等人 | `Run.create(directory, description, ...)`，然后 `start(inputs)`；后来用 `Run(directory)` 查看、答复或继续 |
+| `run` | `from interlacing import run` | 手里有函数、节点或图，想直接传入数据并取结果。也可以传 `workers`、`observe` 等引擎选项。 |
+| `Run` | `from interlacing.runs import Run` | 后续进程需要找到同一次本地运行。按图描述创建目录并启动，以后可重新打开目录，查看、答复或续跑。 |
+| `Engine` | `from interlacing import Engine` | 应用自己持有编译好的图，要控制执行过程。可以操作运行中的节点，或调用 `await engine.arun(inputs)`。恢复日志时，用相同的图和日志重建引擎，再调用 `resume()`。 |
+
+以草稿交给编辑为例。下面用临时目录便于重复练习。实际跨进程交接时，把目录换成持久路径。`answer` 写入决定，`resume` 让图继续。
+
+```python
+from tempfile import TemporaryDirectory
+from interlacing.runs import Run
+
+graph = {"nodes": [{"id": "editor", "kind": "human"}],
+         "inputs": {"draft": "editor.request"}, "outputs": {"verdict": "editor.answer"}}
+
+with TemporaryDirectory() as directory:
+    job = Run.create(directory, graph, journal="sqlite")
+    assert job.start({"draft": "A note about tides."})["status"] == "waiting"
+    reopened = Run(directory)
+    reopened.answer({"approved": True})
+    assert reopened.resume()["outputs"]["verdict"] == [{"approved": True}]
+```
 
 **读一次运行。** `Result.rounds` 是各节点的激活次数，`used` 是累计用量，`problems` 记录检查或处理过的问题，`held` 记录结束时仍暂停或停止的节点。失败时检查 `RunError.node`、`used` 和 `problems`。节点可用 `ctx.use(...)` 上报成本，用 `ctx.time_left()` 查看单次激活余下时间；`time_left` 也可作为 Agent 工具。超时的进程内线程可能继续执行外部操作，需要强制终止的任务应选择独立进程。
 
@@ -212,7 +230,58 @@ $ interlacing resume --dir variant-run
 
 **试用 MCP 审查模拟。** 在 `examples/data` 中启动服务，让客户端以 stdio 运行 `python -m interlacing.cli serve --runs /绝对路径/runs --allow steps`。将 [cooling_review.json](../examples/data/cooling_review.json) 的内容作为 `start.graph`，输入 `{"steps":100}`。B1 会收到 B2 的初稿 36.6032。用同一运行编号调用 `show`（`timeline: true`），可看到 B2 已经运行、B1 正在等人。在这个示例里，初稿误把百分数当作比例。用 `answer` 提交 `{"units":"percent","reading":36.6032}`，再调 `resume`。完成后的 `outputs.report` 只含 0.366，`used.simulations` 为 1。
 
-PostgreSQL 协作服务支持项目成员、人工任务认领和多个工作进程。[启动方法和 HTTP 接口](POSTGRES.md)
+<a id="collaborate"></a>
+
+## 让同事完成编辑这一步
+
+[发布草稿的图](../examples/data/release.json)已经把普通函数 `steps.draft` 接到人工节点 `editor`。末尾的 `steps.publish` 同时读取草稿和审核决定。要让 Alice 用自己的账号看到待办，把同一份图提交给 PostgreSQL 协作服务即可。
+
+1. 在当前仓库根目录执行 `python -m pip install -e ".[postgres]"`。在各服务终端设置 `INTERLACING_POSTGRES_DSN` 指向同一个专用 PostgreSQL 数据库。执行 `interlacing collab init`，然后用 `interlacing collab project editorial lead` 创建新的演示项目。在客户端终端把返回的主管令牌设为 `MANAGER_TOKEN`。
+2. 启动 `interlacing collab serve`。在另一终端进入 `examples/data`，执行 `python -m interlacing.cli collab worker --allow steps`，使 worker 可以加载图里用到的两个函数。
+3. 在第三个终端进入 `examples/data` 并启动 Python。首次创建成员 Alice，然后提交图，保留这个 Python 会话。
+
+```pycon
+>>> import json
+>>> import os
+>>> from pathlib import Path
+>>> from interlacing.collab.client import Client
+>>> url = os.environ.get("INTERLACING_URL", "http://127.0.0.1:8765")
+>>> lead = Client(url, os.environ["MANAGER_TOKEN"])
+>>> reviewer = lead.request("member", name="Alice")
+>>> graph = json.loads(Path("release.json").read_text(encoding="utf-8"))
+>>> job = lead.request("start", graph=graph, inputs={"topic": "tides"}, assignments={"editor": "Alice"})
+```
+
+把成员令牌 `reviewer["token"]` 交给 Alice。同机演示时，她打开 `http://127.0.0.1:8765/review`，输入自己的令牌，刷新任务，选择 **editor**，提交 `{"approved": true}`。远程审核人使用部署方提供的服务地址。等 worker 完成后，主管在刚才的 Python 会话查看结果。
+
+```pycon
+>>> lead.request("status", run=job["run"])["result"]["outputs"]["result"]
+['published: A note about tides.']
+```
+
+接下来可以用[多人建模示例](../examples/review/model_review.py)尝试并行审核和输入修订。[协作服务与操作步骤](POSTGRES.md) · [部署与恢复](DEPLOY.md)
+
+<a id="extend"></a>
+
+## 编写可复用的节点
+
+普通计算可以直接写成函数。当组件需要自行声明端口契约或管理资源生命周期时，可以继承 `Node`。下面的计数器可以接到任何提供文本输入的图里。
+
+```python
+from interlacing import Node, Port, run
+
+class CountWords(Node):
+    kind = "word_count"
+    inputs = (Port("text", str),)
+    outputs = (Port("count", int),)
+
+    def run(self, ctx, inputs):
+        return {"count": len(inputs["text"].split())}
+
+assert run(CountWords("count_words"), {"text": "ocean tides"}).last("count") == 2
+```
+
+要扩展边的传输语义，可查看[协议选择](#edges)和 [Protocol 接口](../src/interlacing/base/protocol.py)。要改调度或恢复机制，可从下面的维护地图定位实现与测试。
 
 <a id="maintain"></a>
 
@@ -232,6 +301,7 @@ PostgreSQL 协作服务支持项目成员、人工任务认领和多个工作进
 | 接新模型或调整模型返回值解析 | [models](../src/interlacing/models/) | [提供方](../tests/test_providers.py) · [Agent](../tests/test_agent.py) |
 | 更改 JSON、允许的能力或成图指南 | [spec](../src/interlacing/spec/) 的 load、catalog、guide | [图格式](../tests/test_spec.py) · [动态子图](../tests/test_spawn.py) |
 | 修改一行式 Python 入口、运行目录、命令或 MCP 工具 | [quick.py](../src/interlacing/quick.py) · [runs.py](../src/interlacing/runs.py) · [cli.py](../src/interlacing/cli.py) · [serve.py](../src/interlacing/serve.py) | [CLI](../tests/test_cli.py) · [MCP](../tests/test_serve.py) |
+| 项目成员、任务分派或协作运行 | [collab](../src/interlacing/collab/) | [PostgreSQL 集成测试](../tests/test_postgres_collab.py) |
 
 | 症状 | 第一个检查点 |
 |---|---|
