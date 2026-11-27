@@ -1,6 +1,8 @@
 # 展示与部署
 
-适用版本为已包含 PR #52 的仓库检出。以下命令适用于 Linux、Python 3.11+ 和 PostgreSQL 16。服务、工作进程和节点模块使用同一份代码。以下示例目录为 `/opt/interlacing/app`，虚拟环境为 `/opt/interlacing/venv`。
+[English](DEPLOY.en.md) · **中文**
+
+请使用包含 PR #52 协作功能和 PR #53 演练脚本的仓库版本。以下命令适用于 Linux、Python 3.11+ 和 PostgreSQL 16。服务、工作进程和节点模块使用同一份代码。以下示例目录为 `/opt/interlacing/app`，虚拟环境为 `/opt/interlacing/venv`。
 
 ## 先跑完整演示
 
