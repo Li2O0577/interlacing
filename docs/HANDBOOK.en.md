@@ -1,6 +1,8 @@
 # interlacing · Python user and maintainer guide
 
-[中文](HANDBOOK.zh-CN.md) · **English** · Python 3.11+. Install the core package for local JSONL and SQLite runs. For the PostgreSQL collaboration service, use `python -m pip install "interlacing[postgres]==0.17.0"`. Start with the first two examples if you are new. If you inherited a graph, start with the maintainer map at the end.
+[中文](HANDBOOK.zh-CN.md) · **English** · Python 3.11+. The core package runs local JSONL and SQLite workflows. For the browser review exercise, install the current checkout with the `postgres` extra. [Release changes](../CHANGELOG.md)
+
+**Choose by task.** [First graph](#start) · [Save and resume](#run) · [Assign a review](#collaborate) · [Write a custom node](#extend)
 
 [Quick start](#start) · [Graphs and ordering](#graph) · [Edge protocols](#edges) · [Choosing nodes](#nodes) · [Composition](#compose) · [Execution and recovery](#run) · [Challenges and corrections](#review) · [JSON, CLI and MCP](#cli) · [Maintenance and troubleshooting](#maintain)
 
@@ -131,12 +133,28 @@ A **method** is a reusable wiring pattern. Use `Chain(a, b)` for sequential work
 
 ## 6 · Execute, observe and recover
 
-| Entry point | Use it when | What to inspect |
+| Choose | Import | When to use it |
 |---|---|---|
-| `run(thing, inputs, **options)` | Running a function, node, method or graph in a script or test | Returns a `Result`; inspect `outputs`, `last(name)` and `complete` |
-| `Engine(graph, ...).run(inputs)` | You need scheduling, budgets, journaling or observation | `workers` controls parallel worker threads, `time_limit` bounds an activation, `budget` totals reported usage, and `observe` receives events. For async execution use `await engine.arun(inputs)` |
-| `Engine(..., journal=Journal(path)).resume()` | Your application owns the graph and journal and needs to resume after a restart | Recreate the engine with the same graph and journal. `Journal(path, sync=True)` additionally syncs every record to disk |
-| `interlacing.runs.Run` | Processes hand off a run directory, often while waiting for a person | Use `Run.create(directory, description, ...)`, then `start(inputs)`. Later open `Run(directory)` to inspect, answer or resume |
+| `run` | `from interlacing import run` | You have a function, node or graph and want its result now. Pass inputs directly. Options such as `workers` and `observe` reach the engine. |
+| `Run` | `from interlacing.runs import Run` | A later process needs to open the same local run. Create a directory from a graph description, start it, then reopen it to inspect, answer or resume. |
+| `Engine` | `from interlacing import Engine` | Your application owns the compiled graph and execution lifecycle. Keep the engine to control nodes or use `await engine.arun(inputs)`. For journal recovery, rebuild it with the same graph and journal and call `resume()`. |
+
+Try handing a draft to an editor. Here a temporary directory lasts for the example. Give `Run.create` a persistent path to return to it from another process. `answer` records the decision and `resume` advances the graph.
+
+```python
+from tempfile import TemporaryDirectory
+from interlacing.runs import Run
+
+graph = {"nodes": [{"id": "editor", "kind": "human"}],
+         "inputs": {"draft": "editor.request"}, "outputs": {"verdict": "editor.answer"}}
+
+with TemporaryDirectory() as directory:
+    job = Run.create(directory, graph, journal="sqlite")
+    assert job.start({"draft": "A note about tides."})["status"] == "waiting"
+    reopened = Run(directory)
+    reopened.answer({"approved": True})
+    assert reopened.resume()["outputs"]["verdict"] == [{"approved": True}]
+```
 
 **Read a run.** `Result.rounds` counts activations by node, `used` totals usage, `problems` records checks or handled issues, and `held` lists nodes paused or stopped when execution ended. On failure inspect `RunError.node`, `used` and `problems`. A node reports cost with `ctx.use(...)` and checks its remaining activation time with `ctx.time_left()`. The `time_left` helper is also available as an agent tool. A timed-out in-process thread may still perform external actions; use a subprocess when termination is required.
 
@@ -214,7 +232,58 @@ Exit codes for `run/resume`: `0` completed, `1` failed or refused, `3` waiting f
 
 **Try the simulation review over MCP.** From `examples/data`, configure the client to launch `python -m interlacing.cli serve --runs /absolute/path/to/runs --allow steps` over stdio. Pass the contents of [cooling_review.json](../examples/data/cooling_review.json) as `start.graph` with inputs `{"steps":100}`. B1 receives B2’s draft, 36.6032. Call `show` with the run ID and `timeline: true` to see that B2 ran and B1 awaits a person. In this example the draft used a percentage as a fraction. Submit `{"units":"percent","reading":36.6032}` with `answer`, then call `resume`. The final `outputs.report` contains only 0.366 and `used.simulations` is 1.
 
-Use the PostgreSQL collaboration service for project memberships, human task assignment and multiple workers. [Operator guide and HTTP API](POSTGRES.md)
+<a id="collaborate"></a>
+
+## Assign the editor step to a colleague
+
+The [release graph](../examples/data/release.json) already connects `steps.draft` to the human node `editor`. The final function `steps.publish` reads both the draft and the editor’s verdict. To give Alice her own task list, run the same graph in a project on the PostgreSQL service.
+
+1. From this checkout install `python -m pip install -e ".[postgres]"`. In each service terminal set `INTERLACING_POSTGRES_DSN` to the same dedicated PostgreSQL database. Run `interlacing collab init`, then `interlacing collab project editorial lead` once for a new demo project. Set `MANAGER_TOKEN` in your client terminal to the returned token.
+2. Start `interlacing collab serve`. In a second terminal, from `examples/data`, start `python -m interlacing.cli collab worker --allow steps` so the worker can load the graph’s two functions.
+3. In a third terminal, open Python in `examples/data`. Create Alice once and submit the graph. Keep this Python session open.
+
+```pycon
+>>> import json
+>>> import os
+>>> from pathlib import Path
+>>> from interlacing.collab.client import Client
+>>> url = os.environ.get("INTERLACING_URL", "http://127.0.0.1:8765")
+>>> lead = Client(url, os.environ["MANAGER_TOKEN"])
+>>> reviewer = lead.request("member", name="Alice")
+>>> graph = json.loads(Path("release.json").read_text(encoding="utf-8"))
+>>> job = lead.request("start", graph=graph, inputs={"topic": "tides"}, assignments={"editor": "Alice"})
+```
+
+Give Alice her member token (`reviewer["token"]`). On the same machine, open `http://127.0.0.1:8765/review` as Alice, refresh the tasks, open **editor**, and submit `{"approved": true}`. A remote reviewer uses the service URL provided by the operator. Once the worker finishes, check the result in the manager’s Python session.
+
+```pycon
+>>> lead.request("status", run=job["run"])["result"]["outputs"]["result"]
+['published: A note about tides.']
+```
+
+To try concurrent reviewers and a revised input, continue with the [model review example](../examples/review/model_review.py). [Service operations (Chinese)](POSTGRES.md) · [Deployment and recovery (Chinese)](DEPLOY.md)
+
+<a id="extend"></a>
+
+## Implement a reusable node
+
+Use a plain function for a calculation. Define a `Node` subclass when the component owns a port contract or needs lifecycle hooks. Here the same word counter can be placed in any graph that supplies text.
+
+```python
+from interlacing import Node, Port, run
+
+class CountWords(Node):
+    kind = "word_count"
+    inputs = (Port("text", str),)
+    outputs = (Port("count", int),)
+
+    def run(self, ctx, inputs):
+        return {"count": len(inputs["text"].split())}
+
+assert run(CountWords("count_words"), {"text": "ocean tides"}).last("count") == 2
+```
+
+For edge behavior, see [protocol selection](#edges) and the [Protocol contract](../src/interlacing/base/protocol.py). For scheduling or recovery changes, use the maintainer map below.
 
 <a id="maintain"></a>
 
@@ -234,6 +303,7 @@ Start with the layer that owns the behavior, then find a test that exercises its
 | Model adapter or response parsing | [models](../src/interlacing/models/) | [Providers](../tests/test_providers.py) · [Agent](../tests/test_agent.py) |
 | JSON, host capabilities or graph authoring guide | load, catalog and guide in [spec](../src/interlacing/spec/) | [Graph format](../tests/test_spec.py) · [Spawn](../tests/test_spawn.py) |
 | Python shortcut, run directory, command or MCP tool | [quick.py](../src/interlacing/quick.py) · [runs.py](../src/interlacing/runs.py) · [cli.py](../src/interlacing/cli.py) · [serve.py](../src/interlacing/serve.py) | [CLI](../tests/test_cli.py) · [MCP](../tests/test_serve.py) |
+| Project membership, task assignment or collaborative execution | [collab](../src/interlacing/collab/) | [PostgreSQL integration tests](../tests/test_postgres_collab.py) |
 
 | Symptom | First thing to check |
 |---|---|

@@ -19,6 +19,11 @@ def test_handbook_examples_and_api(tmp_path):
         rows = re.findall(r'^\| `(\w+)` \| ((?:`\w+`(?:, )?)+) \|$', text, re.M)
         documented = {name: module for module, names in rows for name in re.findall(r'`(\w+)`', names)}
         assert documented == interlacing._PUBLIC, language
+        readme_name = 'README.md' if language == 'en' else 'README.zh-CN.md'
+        readme = (ROOT / readme_name).read_text(encoding='utf-8')
+        for anchor in ('start', 'run', 'collaborate', 'extend'):
+            assert f'(docs/HANDBOOK.{language}.md#{anchor})' in readme
+            assert f'<a id="{anchor}"></a>' in text
         editions.append(re.findall(r'^```(python|sh)\n(.*?)\n```$', text, re.M | re.S))
     assert editions[0] == editions[1]
     shutil.copytree(ROOT / 'examples', tmp_path / 'examples')

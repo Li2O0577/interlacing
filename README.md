@@ -14,6 +14,15 @@ Join anything into a graph and run it.
 
 The engine runs the graph and looks after the run: outputs are checked, usage is counted against a budget, activations are timed, everything is journaled so an interrupted run carries on, and an observer is told what happens as it happens. The package is a kernel to build frameworks on. The core runs on the Python standard library. The optional PostgreSQL collaboration service also requires the postgres extra (psycopg).
 
+## Choose a starting point
+
+| Goal | Python entry point | What you will do |
+|---|---|---|
+| [Write a first graph](docs/HANDBOOK.en.md#start) | `from interlacing import Chain, run` | Connect two Python functions and read the result. |
+| [Save and resume](docs/HANDBOOK.en.md#run) | `from interlacing.runs import Run` | Reopen a local directory and answer a pending question. |
+| [Assign a step to a colleague](docs/HANDBOOK.en.md#collaborate) | `from interlacing.collab.client import Client` | Send a draft to a named reviewer, then publish their decision. |
+| [Extend the framework](docs/HANDBOOK.en.md#extend) | `from interlacing import Node, Port` | Implement a reusable node with typed ports. |
+
 ## Install
 
 ```sh
@@ -239,6 +248,7 @@ The kernel carries information and looks after the run. How a model thinks, how 
 | Blocks | `interlacing.blocks` | `Block`, `seq`, `par` |
 | Graphs as data | `interlacing.spec` | `dump`, `load`, `read`, `write`, `Catalog`, `SpawnNode`, `GUIDE`, `guide`, `functions` |
 | Outside | `interlacing.runs`, `interlacing.cli`, `interlacing.serve`, `interlacing.quick` | `Run`; the command `interlacing`; the MCP server; `run` |
+| Team workflows | `interlacing.collab` | `collab.client.Client` submits work over HTTP. The service assigns tasks, workers execute the graph, and members answer in the browser. |
 
 Each layer uses only the layers below it. The engine knows no particular node, protocol or method; a test in `tests/test_engine.py` holds it to that. Inside, the engine is a few small parts, each with one job: the mailboxes a graph becomes (`wiring`), when a node may run (`scheduler`), what is checked and what follows a problem (`checks`), the budget (`ledger`), the journal (`recorder`), time limits (`clock`).
 

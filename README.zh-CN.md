@@ -14,6 +14,15 @@
 
 引擎运行这张图并照看这次运行：输出要经过检查，用量按预算计数，每次激活都计时，所有事情写入日志，被打断的运行可以接着跑，观察者在事情发生的当时就被告知。这个包是一个内核，用来在它上面搭框架。核心只依赖 Python 标准库。可选的 PostgreSQL 协作服务还需安装 postgres 扩展依赖（psycopg）。
 
+## 从哪一步开始
+
+| 我想做什么 | Python 入口 | 跑完能看到什么 |
+|---|---|---|
+| [写第一张图](docs/HANDBOOK.zh-CN.md#start) | `from interlacing import Chain, run` | 把两个 Python 函数连起来，读出结果。 |
+| [保存和恢复工作流](docs/HANDBOOK.zh-CN.md#run) | `from interlacing.runs import Run` | 重新打开本地运行目录，回答待办问题并续跑。 |
+| [把一步交给同事](docs/HANDBOOK.zh-CN.md#collaborate) | `from interlacing.collab.client import Client` | 让指定成员审核草稿，按其答复决定是否发布。 |
+| [扩展框架](docs/HANDBOOK.zh-CN.md#extend) | `from interlacing import Node, Port` | 编写一个声明输入输出类型、能重复使用的节点。 |
+
 ## 安装
 
 ```sh
@@ -234,6 +243,7 @@ interlacing resume --dir /tmp/run                                               
 | 块 | `interlacing.blocks` | `Block`、`seq`、`par` |
 | 写成数据的图 | `interlacing.spec` | `dump`、`load`、`read`、`write`、`Catalog`、`SpawnNode` |
 | 对外 | `interlacing.runs`、`interlacing.cli`、`interlacing.serve`、`interlacing.quick` | `Run`；命令 `interlacing`；MCP 服务；`run` |
+| 多人协作 | `interlacing.collab` | `collab.client.Client` 通过 HTTP 提交工作。服务端分派任务，worker 执行图，成员在浏览器里审核。 |
 
 每一层只使用它下面的层。引擎不认识任何具体的节点、协议或方法，`tests/test_engine.py` 里有一个测试守着这一点。引擎内部由几个各管一件事的小部件组成：图变成的信箱（`wiring`）、节点何时能运行（`scheduler`）、检查什么以及出问题后怎么办（`checks`）、预算（`ledger`）、日志（`recorder`）、时限（`clock`）。
 
