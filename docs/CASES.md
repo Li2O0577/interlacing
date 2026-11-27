@@ -1,6 +1,6 @@
 # 三个案例：这个内核在实践里怎么用
 
-[English summary](../README.md#what-it-is-for) · [完整说明](GRAPH.md) · [返回](../README.zh-CN.md)
+[English](CASES.en.md) · **中文** · [完整说明](GRAPH.md) · [返回](../README.zh-CN.md)
 
 三个案例都按同一个办法读：先看要做的系统是什么形状，再看每一块落在内核的哪个部件上，最后看哪些事内核不管、要自己写。案例里的代码都用假模型跑通过；第一个案例整个是可以运行的示例。
 

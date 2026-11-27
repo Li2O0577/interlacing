@@ -6,7 +6,7 @@
 
 把任何东西连成一张图，然后运行它。
 
-[Python 使用与维护手册](docs/HANDBOOK.zh-CN.md)
+[Python 使用与维护手册](docs/HANDBOOK.zh-CN.md) · [图与 API 参考](docs/GRAPH.md) · [案例详解](docs/CASES.md) · [协作服务](docs/POSTGRES.md) · [部署与恢复](docs/DEPLOY.md)
 
 - **节点**是任何接收信息并给出信息的东西：模型、函数、外部程序、设备、人，或者另一张图。
 - **边**按一份写明的协议把信息从一个节点带到另一个节点：排队的值、只留最新值、状态、信号、流、有应答的调用、按路径传递的文件。

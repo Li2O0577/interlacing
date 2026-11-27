@@ -6,7 +6,7 @@
 
 Join anything into a graph and run it.
 
-[Python user and maintainer guide](docs/HANDBOOK.en.md)
+[Python user and maintainer guide](docs/HANDBOOK.en.md) · [Graph and API reference](docs/GRAPH.en.md) · [Worked examples](docs/CASES.en.md) · [Collaboration service](docs/POSTGRES.en.md) · [Deployment and recovery](docs/DEPLOY.en.md)
 
 - A **node** is anything that takes information in and gives information out: a model, a function, an external program, a device, a person, or another graph.
 - An **edge** carries information from one node to another under a written protocol: queued values, latest value only, state, signals, streams, calls that are answered, files passed by path.
@@ -228,7 +228,7 @@ Model keys are read from the environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` 
 
 ## What it is for
 
-Three worked cases are in [docs/CASES.md](docs/CASES.md) (in Chinese). In short:
+Three worked cases are in [docs/CASES.en.md](docs/CASES.en.md). In short:
 
 | Case | How it is built |
 |---|---|
@@ -254,9 +254,9 @@ Each layer uses only the layers below it. The engine knows no particular node, p
 
 The full description is [docs/GRAPH.en.md](docs/GRAPH.en.md) (also [in Chinese](docs/GRAPH.md)). Twenty examples that run as they stand are in [examples/graphs/](examples/graphs), and graphs written as JSON in [examples/data/](examples/data).
 
-A manager can fork an approved quote, change its value and send it back to the affected reviewer while retaining the original approval. The PostgreSQL service also streams root run progress and supports bounded retries for transient failures. See the [service guide and examples](docs/POSTGRES.md). The [capability review against LangGraph (Chinese)](docs/LANGGRAPH_COMPARISON.md) records the tested scheduling difference and the limits of the service API.
+A manager can fork an approved quote, change its value and send it back to the affected reviewer while retaining the original approval. The PostgreSQL service also streams root run progress and supports bounded retries for transient failures. See the [service guide and examples](docs/POSTGRES.en.md). The [capability review against LangGraph (Chinese)](docs/LANGGRAPH_COMPARISON.md) records the tested scheduling difference and the limits of the service API.
 
-[Deployment and recovery rehearsals (Chinese)](docs/DEPLOY.md)
+[Deployment and recovery rehearsals](docs/DEPLOY.en.md)
 
 For the matching source and guides of a published version, open its tag on the [GitHub releases page](https://github.com/Li2O0577/interlacing/releases). The [branch review](docs/BRANCH_REVIEW.md) records reproduced issues and recovery checks. The [implementation plan](docs/NEXT_PLAN.md) covers the delivered features and the remaining deployment checks. Both documents are in Chinese.
 

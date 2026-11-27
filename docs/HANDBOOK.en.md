@@ -212,7 +212,7 @@ $ interlacing resume --dir variant-run
 
 Fork at a position where all activations have settled and choose a new directory. You can replace unconsumed graph inputs and supply inputs omitted at event `1`. Each fork has its own journal, run ID and workspace, with a reference to the parent run and event. Workspace files and human questions and answers are outside the historical snapshot. A fork defaults to inspection only. With `--execute`, `resume` runs nodes with the inherited capabilities, so they can produce external side effects. Python callers can use `Run.checkpoints()`, `Run.show(at=...)` and `Run.fork(..., at=..., inputs=..., execute=True)`.
 
-To try a revised intermediate result, select a settled root event in a static graph. Pass an output edit such as `{"node":"quote","token":"price#1","version":1,"value":120,"reason":"updated offer"}` to `Run.fork(..., output=edit)` or as JSON to `fork --output`. Forward value edges follow their normal correction policies. A new branch can therefore reuse independent work and ask for a fresh approval where the quote was consumed. See the [service examples](POSTGRES.md).
+To try a revised intermediate result, select a settled root event in a static graph. Pass an output edit such as `{"node":"quote","token":"price#1","version":1,"value":120,"reason":"updated offer"}` to `Run.fork(..., output=edit)` or as JSON to `fork --output`. Forward value edges follow their normal correction policies. A new branch can therefore reuse independent work and ask for a fresh approval where the quote was consumed. See the [service examples](POSTGRES.en.md).
 
 This mode supports value and artifact edges with an optional challenge budget, activation-start input binding, additive graph edits and pause, stop and resume. Choose the standard mode for streams, calls, mid-activation receive, node restart or replacing the graph on resume. For external effects, use provider idempotency keys where available. Durable delivery deduplicates graph messages. An interrupted user function can still run again.
 
@@ -261,7 +261,7 @@ Give Alice her member token (`reviewer["token"]`). On the same machine, open `ht
 ['published: A note about tides.']
 ```
 
-To try concurrent reviewers and a revised input, continue with the [model review example](../examples/review/model_review.py). [Service operations (Chinese)](POSTGRES.md) · [Deployment and recovery (Chinese)](DEPLOY.md)
+To try concurrent reviewers and a revised input, continue with the [model review example](../examples/review/model_review.py). [Service operations](POSTGRES.en.md) · [Deployment and recovery](DEPLOY.en.md)
 
 <a id="extend"></a>
 

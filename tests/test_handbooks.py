@@ -47,3 +47,26 @@ def test_handbook_examples_and_api(tmp_path):
                 assert result.returncode == (3 if args[1] == 'run' else 0), result.stdout
                 if args[1] == 'resume':
                     assert json.loads(result.stdout)['outputs']['result'] == ['published: A note about tides.']
+
+
+def test_guides_link_to_both_editions():
+    english_index = (ROOT / 'README.md').read_text(encoding='utf-8')
+    chinese_index = (ROOT / 'README.zh-CN.md').read_text(encoding='utf-8')
+    for topic in ('HANDBOOK', 'GRAPH', 'CASES', 'POSTGRES', 'DEPLOY'):
+        english = f'{topic}.en.md'
+        chinese = 'HANDBOOK.zh-CN.md' if topic == 'HANDBOOK' else f'{topic}.md'
+        for edition, counterpart, index in ((english, chinese, english_index), (chinese, english, chinese_index)):
+            assert f'(docs/{edition})' in index
+            assert f'({counterpart})' in (ROOT / 'docs' / edition).read_text(encoding='utf-8')
+
+
+def test_operator_commands_match_between_editions():
+    def commands(filename):
+        text = (ROOT / 'docs' / filename).read_text(encoding='utf-8')
+        blocks = re.findall(r'^```(sh|ini)\n(.*?)\n```$', text, re.M | re.S)
+        return [(kind, [line for line in body.splitlines() if not line.lstrip().startswith('#')])
+                for kind, body in blocks]
+
+    for topic in ('POSTGRES', 'DEPLOY'):
+        english = commands(f'{topic}.en.md')
+        assert english and english == commands(f'{topic}.md')
