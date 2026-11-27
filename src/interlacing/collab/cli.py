@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import time
+from importlib.resources import files
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
@@ -47,6 +48,17 @@ def server(database, port):
 
         def do_GET(self):
             url = urlsplit(self.path)
+            if url.path == "/review":
+                body = files("interlacing.collab").joinpath("review.html").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Frame-Options", "DENY")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if url.path != "/v1/progress":
                 return self.reply(404, {"code": "not_found", "error": "unknown endpoint"})
             scheme, _, token = self.headers.get("Authorization", "").partition(" ")

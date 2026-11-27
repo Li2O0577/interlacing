@@ -143,3 +143,16 @@ branch = client.request("fork", run=run_id, at=position, output=edit, execute=Tr
 本分支已实测停写后同时备份 PostgreSQL 与内容目录，在独立数据库恢复后读取原文件并完成原待办。持续写入时取得两者一致快照、跨主机恢复和恢复耗时仍需验证。[恢复演练记录](BRANCH_REVIEW.md)
 
 使用独立的测试数据库设置 `INTERLACING_TEST_POSTGRES` 后，运行 `python -m pytest -q tests/test_postgres_collab.py`，可验证双进程执行、租约接管、并发认领、提交回滚、任务和资料访问范围。
+
+## 在浏览器里审核一次数学建模返工
+
+升级后先运行 `interlacing collab init`。使用测试项目，主管按前面的步骤创建成员 Alice 和 Bob。
+从仓库根目录进入 `examples/review`，在该目录启动 `interlacing collab worker --allow model_review`。
+另一个终端设置主管令牌环境变量 `MANAGER_TOKEN`，在相同目录执行 `python model_review.py`，记下返回的运行 UUID。
+
+1. Alice 和 Bob 分别打开服务的 `/review`，输入各自的成员令牌。Alice 为 q1 提交整数 9，为独立的 q3 提交 5。Bob 刷新后读取 q1 的结果，在 q2 提交预测值 18。
+2. 主管确认运行已完成后执行 `python model_review.py --revise 原运行UUID --value 12`，创建独立分叉。
+3. Bob 刷新并选择新运行的 q2，比较原输入 9 和当前输入 12，查看修改人和理由，提交 24。Alice 的 q3 结果沿用。新报告为 24 和 5，原报告仍为 18 和 5。
+4. 主管用自己的令牌打开分叉任务，刷新后可查看已启动、已修订和当前沿用结果的根节点。普通成员仅能读取可见任务的修订信息；历史输入只向有权读取对应旧任务的人展示。页面使用内存中的令牌，刷新页面需重新登录。
+
+任务详情也可用 `review(task=UUID)` 获取。对照信息来自任务绑定的具体投递和修订事件，嵌套任务同时记录它的外层输入依赖。

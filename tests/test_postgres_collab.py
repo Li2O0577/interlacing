@@ -755,6 +755,14 @@ def test_fork_output_reopens_only_dependent_human_review(service):
     assert work_one(db, 'ask-again')['state'] == 'waiting'
     pending, = [t for t in alice('tasks') if t['run'] == branch]
     assert pending['node'] == 'review' and pending['request'] == 12
+    detail = alice('review', task=pending['id'])
+    change, = detail['changes']
+    assert change['previous'] == 9 and change['external']['reason'] == 'revised quote'
+    assert change['external']['actor'] == 'lead' and detail['task']['request'] == 12
+    assert 'impact' not in detail
+    assert lead('review', task=pending['id'])['impact']['activated'] == ['review']
+    with pytest.raises(Refused):
+        service[3]('review', task=pending['id'])
     alice('submit', task=pending['id'], version=pending['version'], answer=13)
     assert work_one(db, 'finish-again')['state'] == 'done'
     assert lead('status', run=branch)['result']['outputs']['signed'] == [13]

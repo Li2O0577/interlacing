@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 from ..base import Ref, canonical, digest
 from ..spec.kinds import schema_of
+from .review import review_task
 from .history import fork_run, inspect_run, positions, progress_page, read_history
 from .validation import validate_submission
 from .database import Database, Refused, RequestConflict, encoded
@@ -59,7 +60,9 @@ class Collaboration:
                                (_secret(token),)).fetchone()
             if not actor:
                 raise Refused("unknown member credentials")
-            operations = {"tasks": self.tasks, "claim": self.claim, "submit": self.submit,
+            if action == "whoami":
+                return dict(actor)
+            operations = {"tasks": self.tasks, "review": review_task, "claim": self.claim, "submit": self.submit,
                           "put": self.put, "get": self.get, "resources": self.resources}
             if actor["role"] == "manager":
                 operations.update(member=self.member, start=self.start, status=self.status, assign=self.assign,

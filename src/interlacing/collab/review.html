@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>任务审核 · Interlacing</title>
+<style>
+* { box-sizing:border-box } body { margin:0;background:#f3f5f2;color:#172621;font:16px/1.55 "Inter",system-ui,sans-serif }
+main { max-width:1100px;margin:auto;padding:30px 22px } header { border-bottom:2px solid #245e4a;margin-bottom:24px }
+h1 { font-size:clamp(26px,4vw,38px);margin:4px 0 16px } h2 {margin:0 0 14px;font-size:21px}
+.panel {background:white;border:1px solid #cad4cf;border-radius:9px;padding:20px;min-width:0}
+.grid {display:grid;grid-template-columns:minmax(230px,1fr) minmax(0,2fr);gap:16px;align-items:start}
+button,input,textarea { font:inherit;border:1px solid #adc0b6;border-radius:5px;padding:8px 12px }
+button {cursor:pointer;background:#205740;color:white} button.secondary {background:white;color:#205740}
+button:disabled {opacity:.55;cursor:default} label {display:block;font-weight:600} textarea {width:100%;min-height:75px}
+pre {white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f6f4;padding:10px;border-radius:4px;margin:5px 0 16px}
+#tasks button {display:block;text-align:left;width:100%;margin-top:8px;background:white;color:#17392a}
+#tasks button[aria-current=true] {background:#e3efe8;border-color:#205740}
+#identity {margin-right:16px} #status {min-height:1.55em} #detail h3 {font-size:15px;margin-bottom:3px}
+[hidden] {display:none!important} @media(max-width:650px){.grid{grid-template-columns:1fr}main{padding:18px 12px}}
+</style>
+<main><header><small>Interlacing</small><h1>任务审核</h1></header>
+<form id="login"><label for="token">项目成员令牌</label><input id="token" type="password" required autocomplete="off"> <button>进入工作台</button></form>
+<section id="workspace" hidden><span id="identity"></span><button class="secondary" id="refresh">刷新任务</button>
+<button class="secondary" id="logout">退出</button></section>
+<p id="status" role="status"></p><div class="grid" id="panes" hidden>
+<nav class="panel" aria-label="审核任务"><h2>任务列表</h2><div id="tasks"></div></nav>
+<section class="panel" id="detail"><h2>选择一项任务</h2></section></div></main>
+<script>
+'use strict';
+const el = id => document.getElementById(id);
+const labels = {open:'待认领',claimed:'待处理',submitted:'已提交',superseded:'已失效'};
+let token='', actor=null, selected=null, generation=0;
+async function api(action,args={}) {
+  const response = await fetch('/v1/request',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},
+    body:JSON.stringify({action,args}),cache:'no-store'});
+  const data=await response.json();
+  if(!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+function element(tag,text) { const x=document.createElement(tag);x.textContent=text;return x }
+function field(panel,label,value) {
+  panel.append(element('h3',label),element('pre',typeof value==='string'?value:JSON.stringify(value,null,2)));
+}
+function fail(error) { el('status').textContent=error.message; }
+async function show(id) {
+  selected=id;
+  const page=++generation, result=await api('review',{task:id});
+  if(page!==generation) return;
+  const task=result.task, panel=el('detail');
+  panel.replaceChildren(element('h2',task.node));
+  for(const b of el('tasks').children) b.setAttribute('aria-current',String(b.dataset.task===id));
+  field(panel,'运行 · 轮次 · 负责人',task.run+' · '+task.turn+' · '+(task.assignee || '待认领'));
+  for(const change of result.changes) {
+    field(panel,'修订来源',change.source+' · 消息版本 '+change.message_version);
+    if(change.external) field(panel,'修改人及原因',change.external.actor+' · '+change.external.reason);
+    if(change.can_compare) field(panel,'上次审核的输入',change.previous);
+  }
+  field(panel,'本次审核的输入',task.request);
+  if(result.impact) {
+    field(panel,'分叉后已启动的根节点',result.impact.activated);
+    field(panel,'输出已修订的根节点',result.impact.revised);
+    field(panel,'截至目前沿用原结果的根节点',result.impact.carried);
+  }
+  const mine=task.state==='claimed' && task.assignee===actor.name;
+  if(mine) {
+    field(panel,'答复格式',task.answer_schema);
+    const label=element('label','答复（JSON）');label.htmlFor='answer';
+    const input=element('textarea','');input.id='answer';panel.append(label,input);
+  }
+  if(mine || task.state==='open') {
+    const button=element('button',mine?'提交答复':'认领任务');panel.append(button);
+    button.onclick=async()=>{
+      button.disabled=true;
+      try {
+        const args={task:id,version:task.version};
+        if(mine) args.answer=JSON.parse(el('answer').value);
+        await api(mine?'submit':'claim',args);
+        await refresh(); el('status').textContent=mine?'答复已提交。':'已认领。';
+      } catch(error) {fail(error);button.disabled=false}
+    };
+  } else field(panel,'任务状态',labels[task.state] || task.state);
+}
+async function refresh() {
+  const page=++generation, tasks=await api('tasks');
+  if(page!==generation) return;
+  const list=el('tasks'); list.replaceChildren();
+  el('status').textContent=tasks.length?'':'当前没有可见任务。';
+  for(const task of tasks) {
+    const button=element('button',task.node+' · '+(labels[task.state] || task.state)+' · '+task.run.slice(0,8));
+    button.dataset.task=task.id;button.onclick=()=>show(task.id).catch(fail);list.append(button);
+  }
+  if(tasks.some(t=>t.id===selected)) await show(selected);
+  else {selected=null;el('detail').replaceChildren(element('h2','选择一项任务'))}
+}
+el('login').onsubmit=async event=>{
+  event.preventDefault();token=el('token').value.trim();
+  try {
+    actor=await api('whoami');el('token').value='';
+    el('identity').textContent=actor.project+' / '+actor.name;
+    el('login').hidden=true;el('workspace').hidden=el('panes').hidden=false;await refresh();
+  } catch(error) {fail(error)}
+};
+el('refresh').onclick=()=>refresh().catch(fail);
+el('logout').onclick=()=>location.reload();
+</script></html>
