@@ -36,7 +36,8 @@ jobs:
           cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/.clean-env/bin/python" "$GITHUB_WORKSPACE/scripts/package_smoke.py" "$GITHUB_WORKSPACE/examples/graphs"
 
   postgres:
-    runs-on: ubuntu-latest
+    # Ubuntu 24.04 supplies the matching PostgreSQL 16 client for the restore drill.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16
