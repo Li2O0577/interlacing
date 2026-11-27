@@ -239,6 +239,17 @@ def test_http_endpoint_and_bad_credentials(service):
             with pytest.raises(urllib.error.HTTPError) as error:
                 opener.open(request('invalid'), timeout=5)
             assert error.value.code == 403
+            with opener.open(url.rsplit('/', 2)[0] + '/review') as page:
+                assert page.headers.get_content_type() == 'text/html'
+                assert '任务审核' in page.read().decode()
+            from interlacing.collab.client import Client, ServiceError
+            client = Client(url.rsplit('/', 2)[0], token)
+            args = dict(graph=REVIEW, inputs={'x': 'quote'}, request_key='http-test')
+            run = client.request('start', **args)
+            with pytest.raises(ServiceError) as conflict:
+                client.request('start', **{**args, 'workers': 0})
+            assert (conflict.value.status, conflict.value.code) == (409, 'request_key_conflict')
+            assert work_one(db, 'http-worker')['run'] == run['run']
         finally:
             http.shutdown()
             thread.join()
@@ -357,7 +368,8 @@ def release_slow_after_approval(path):
     return "approved"
 
 
-def test_review_can_be_submitted_before_parallel_sibling_finishes(service, tmp_path):
+@pytest.mark.parametrize("nested", [False, True])
+def test_review_can_be_submitted_before_parallel_sibling_finishes(service, tmp_path, nested):
     import time
     db, lead, alice, _ = service
     graph = {'nodes': [{'id':'slow','kind':'function','function':__name__+'.wait_for_release'},
@@ -366,8 +378,14 @@ def test_review_can_be_submitted_before_parallel_sibling_finishes(service, tmp_p
              'inputs': {'path':'slow.path','quote':'fast.x'},
              'edges': [{'from':'fast.y','to':'review.request'}, {'from':'review.answer','to':'publish.path'}],
              'outputs': {'slow':'slow.out','approval':'publish.out'}}
+    assignment = 'review'
+    if nested:
+        graph = {'nodes': [{'id': 'group', 'kind': 'block', 'graph': graph}],
+                 'inputs': {'path': 'group.path', 'quote': 'group.quote'},
+                 'outputs': {'slow': 'group.slow', 'approval': 'group.approval'}}
+        assignment = 'group.1/review'
     gate = tmp_path / 'release'
-    run = lead('start', graph=graph, inputs={'path':str(gate),'quote':8}, assignments={'review':'Alice'})
+    run = lead('start', graph=graph, inputs={'path':str(gate),'quote':8}, assignments={assignment:'Alice'})
     with ThreadPoolExecutor(1) as pool:
         future = pool.submit(work_one, db, 'first', allow=[__name__])
         try:
@@ -382,7 +400,8 @@ def test_review_can_be_submitted_before_parallel_sibling_finishes(service, tmp_p
             gate.touch()
     assert work_one(db, 'next', allow=[__name__]) is None
     assert lead('status', **run)['result']['outputs'] == {'slow':[17], 'approval':['approved']}
-    events = [v['record'] for v in lead('history', **run)]
+    history = lead('history', **run, scope=[['group', 1]] if nested else [])
+    events = [v.get('record', v) for v in history]
     assert [v.get('node') for v in events if v['kind'] == 'act'].count('slow') == 1
 
 
@@ -549,7 +568,7 @@ def test_schema_upgrade_preserves_previous_run_configuration(service):
     try:
         legacy.install()
         with legacy.connect() as conn:
-            conn.execute('ALTER TABLE il_runs DROP COLUMN workers, DROP COLUMN description, DROP COLUMN origin')
+            conn.execute('ALTER TABLE il_runs DROP COLUMN shared_workers, DROP COLUMN workers, DROP COLUMN description, DROP COLUMN origin')
             conn.execute('UPDATE il_schema SET version=1')
             conn.execute("INSERT INTO il_projects VALUES ('team')")
             conn.execute("INSERT INTO il_runs(id,project,graph,inputs,resources,assignments) "
@@ -557,8 +576,9 @@ def test_schema_upgrade_preserves_previous_run_configuration(service):
         legacy.install()
         legacy.install()
         with legacy.connect() as conn:
-            assert conn.execute('SELECT workers,origin FROM il_runs').fetchone() == {'workers':0,'origin':None}
-            assert conn.execute('SELECT version FROM il_schema').fetchone()['version'] == 2
+            assert conn.execute('SELECT workers,origin,shared_workers FROM il_runs').fetchone() == {
+                'workers': 0, 'origin': None, 'shared_workers': False}
+            assert conn.execute('SELECT version FROM il_schema').fetchone()['version'] == 3
     finally:
         with db.connect() as conn:
             conn.execute(f'DROP SCHEMA {schema} CASCADE')
@@ -755,7 +775,19 @@ def test_fork_output_reopens_only_dependent_human_review(service):
     assert work_one(db, 'ask-again')['state'] == 'waiting'
     pending, = [t for t in alice('tasks') if t['run'] == branch]
     assert pending['node'] == 'review' and pending['request'] == 12
-    alice('submit', task=pending['id'], version=pending['version'], answer=13)
+    detail = alice('review', task=pending['id'])
+    change, = detail['changes']
+    assert change['previous'] == 9 and change['external']['reason'] == 'revised quote'
+    assert change['external']['actor'] == 'lead' and detail['task']['request'] == 12
+    assert 'impact' not in detail
+    assert lead('review', task=pending['id'])['impact']['activated'] == ['review']
+    bob = service[3]
+    with pytest.raises(Refused):
+        bob('review', task=pending['id'])
+    moved = lead('assign', task=pending['id'], version=pending['version'], member='Bob')
+    private_change, = bob('review', task=pending['id'])['changes']
+    assert not private_change['can_compare'] and private_change['previous'] is None
+    bob('submit', task=pending['id'], version=moved['version'], answer=13)
     assert work_one(db, 'finish-again')['state'] == 'done'
     assert lead('status', run=branch)['result']['outputs']['signed'] == [13]
     assert lead('history', **run) == history and lead('status', **run)['result']['outputs']['signed'] == [10]
@@ -817,3 +849,59 @@ def test_live_progress_before_completion_and_cursor_resume(service, tmp_path, mo
             gate.touch()
             http.shutdown()
             serving.result()
+
+
+def test_concurrent_keyed_start_replays_one_receipt(service):
+    db, lead, _, _ = service
+    args = dict(graph=REVIEW, inputs={'x': 'quote'}, request_key='review-1')
+    first, second = race(lambda: lead('start', **args), lambda: lead('start', **args))
+    assert first and first == second == lead('start', **args)
+    with pytest.raises(Refused, match='different start arguments'):
+        lead('start', **{**args, 'workers': 0})
+    assert [item['action'] for item in lead('audit')].count('run.start') == 1
+    assert work_one(db, 'worker')['run'] == first['run']
+    assert work_one(db, 'worker') is None
+
+
+def test_invalid_start_does_not_consume_key(service):
+    db, lead, _, _ = service
+    with pytest.raises(Refused):
+        lead('start', graph=REVIEW, assignments={'review': 'unknown'}, request_key='retry')
+    run = lead('start', graph=REVIEW, inputs={'x': 'quote'}, request_key='retry')
+    assert work_one(db, 'worker')['run'] == run['run']
+
+
+def expert_probe():
+    raise AssertionError("missing test probe")
+
+
+def bounded_expert():
+    """The test injects a counter shared by the worker's function nodes."""
+    return expert_probe()
+
+
+@pytest.mark.parametrize('workers,expected,kind', [(0, 1, 'block'), (3, 3, 'block'), (6, 6, 'graph')])
+def test_nested_experts_share_one_run_budget(service, monkeypatch, workers, expected, kind):
+    db, lead, _, _ = service
+    lock = threading.Condition()
+    active = peak = completed = 0
+    def probe():
+        nonlocal active, peak, completed
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            lock.notify_all()
+            try:
+                assert lock.wait_for(lambda: peak >= expected, timeout=8)
+                lock.wait(0.04)
+                completed += 1
+                return 1
+            finally:
+                active -= 1
+    monkeypatch.setattr(sys.modules[__name__], 'expert_probe', probe)
+    experts = {'nodes': [{'id': n, 'kind': 'function', 'function': __name__ + '.bounded_expert'}
+                         for n in ('first', 'second')], 'outputs': {'result': 'second.out'}}
+    graph = {'nodes': [{'id': group, 'kind': kind, 'graph': experts} for group in ('a', 'b', 'c')]}
+    run = lead('start', graph=graph, workers=workers)
+    assert work_one(db, 'worker', allow=[__name__])['state'] == 'done', lead('status', **run)
+    assert (completed, peak) == (6, expected)

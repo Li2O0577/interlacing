@@ -6,11 +6,12 @@ import hashlib
 import secrets
 from uuid import UUID, uuid4
 
-from ..base import Ref, canonical
+from ..base import Ref, canonical, digest
 from ..spec.kinds import schema_of
+from .review import review_task
 from .history import fork_run, inspect_run, positions, progress_page, read_history
 from .validation import validate_submission
-from .database import Database, Refused, encoded
+from .database import Database, Refused, RequestConflict, encoded
 
 
 def audit(db, project, actor, action, subject, details=None):
@@ -53,13 +54,15 @@ class Collaboration:
 
     def request(self, token, action, args):
         with self.database.connect() as db:
-            if action in ("history", "progress", "inspect", "checkpoints", "fork"):
+            if action in ("history", "progress", "inspect", "checkpoints", "fork", "review"):
                 db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             actor = db.execute("SELECT project,name,role FROM il_members WHERE secret=%s FOR SHARE",
                                (_secret(token),)).fetchone()
             if not actor:
                 raise Refused("unknown member credentials")
-            operations = {"tasks": self.tasks, "claim": self.claim, "submit": self.submit,
+            if action == "whoami":
+                return dict(actor)
+            operations = {"tasks": self.tasks, "review": review_task, "claim": self.claim, "submit": self.submit,
                           "put": self.put, "get": self.get, "resources": self.resources}
             if actor["role"] == "manager":
                 operations.update(member=self.member, start=self.start, status=self.status, assign=self.assign,
@@ -144,10 +147,24 @@ class Collaboration:
                 raise Refused("unknown task assignee")
         return result
 
-    def start(self, db, actor, graph, inputs=None, resources=None, assignments=None, workers=4):
+    def start(self, db, actor, graph, inputs=None, resources=None, assignments=None, workers=4, request_key=None):
         if not isinstance(graph, dict) or any(value is not None and not isinstance(value, dict)
                                                for value in (inputs, resources, assignments)):
             raise ValueError("graph, inputs, resources and assignments must be objects")
+        run = str(uuid4())
+        if request_key is not None:
+            if not isinstance(request_key, str) or not request_key.strip() or len(request_key) > 256:
+                raise ValueError("request_key must contain 1 to 256 characters")
+            fingerprint = digest([graph, inputs or {}, resources or {}, assignments or {}, workers])
+            key = (actor["project"], actor["name"], request_key)
+            inserted = db.execute("INSERT INTO il_start_requests VALUES (%s,%s,%s,%s,%s) "
+                                  "ON CONFLICT DO NOTHING RETURNING run", (*key, fingerprint, run)).fetchone()
+            if inserted is None:
+                previous = db.execute("SELECT fingerprint,run FROM il_start_requests WHERE "
+                                      "project=%s AND actor=%s AND request_key=%s", key).fetchone()
+                if previous["fingerprint"] != fingerprint:
+                    raise RequestConflict("request_key already used with different start arguments")
+                return {"run": str(previous["run"])}
         self.validate(db, actor, graph, workers, assignments)
         inputs = dict(inputs or {})
         resources = resources or {}
@@ -157,8 +174,7 @@ class Collaboration:
             item = self._resource(db, actor, **ref)
             inputs[port] = item["data"] if "data" in item else item
         assignments = assignments or {}
-        run = str(uuid4())
-        db.execute("INSERT INTO il_runs(id,project,graph,inputs,resources,assignments,workers) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        db.execute("INSERT INTO il_runs(id,project,graph,inputs,resources,assignments,workers,shared_workers) VALUES (%s,%s,%s,%s,%s,%s,%s,true)",
                    (run, actor["project"], encoded(graph), encoded(inputs), encoded(resources), encoded(assignments), workers))
         db.execute("INSERT INTO il_commands(run,key) VALUES (%s,'start')", (run,))
         audit(db, actor["project"], actor["name"], "run.start", run, {"resources": resources})

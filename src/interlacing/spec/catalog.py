@@ -49,8 +49,10 @@ class Catalog:
                  models: Callable[[str], Any] | None = None, ask: Callable[[str, int, Any], Any] | None = None,
                  protocols: Protocols = DEFAULT, files=None, defaults: Mapping[str, Mapping] | None = None,
                  workspace=None, max_workers: int | None = None, tools=None, apps=None, remotes: Iterable[str] = (),
-                 templates: Mapping[str, Mapping] | None = None, ask_typed: Callable | None = None):
+                 templates: Mapping[str, Mapping] | None = None, ask_typed: Callable | None = None,
+                 default_workers: int = 0):
         self.allow, self.processes, self.max_workers = tuple(allow), bool(processes), max_workers
+        self.default_workers = default_workers
         self.ask_typed = ask_typed
         self.files = Path(files).resolve() if files is not None else None
         self.defaults = {kind: dict(settings) for kind, settings in (defaults or {}).items()}
@@ -114,6 +116,12 @@ class Catalog:
     def allows(self, name: str) -> bool:
         """Whether the dotted name is an allowed module or lies inside one."""
         return any(name == prefix or name.startswith(prefix + ".") for prefix in self.allow)
+
+    def graph_workers(self, config: Mapping) -> int:
+        workers = config.get("workers", self.default_workers)
+        if type(workers) is not int or workers < 0:
+            raise SpecError("graph workers must be a nonnegative integer")
+        return min(workers, self.max_workers) if self.max_workers is not None else workers
 
     def with_defaults(self, defaults: Mapping[str, Mapping]) -> "Catalog":
         """This catalog with more defaults on top of its own."""

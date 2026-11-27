@@ -37,6 +37,10 @@ a loop. ``workers`` still bounds how many activations are under way (one, when i
 order). A coroutine activation that overruns is cancelled. Both drivers share every step of an activation:
 ``_pick``, ``_started``, ``_activate`` (or ``_aactivate``) and ``_ended``.
 
+With ``shared_workers=True``, one FIFO admission budget covers this run and its child graphs. A node
+waiting on a child drive or challenge lends its place. The limit counts running activations, including
+coroutines; driver threads and abandoned timed-out business code are outside that count.
+
 ``stopping`` is a function the engine asks before each activation; once it returns true the run stops as if
 ``stop`` had been called. A graph that runs inside a node of another graph is stopped this way.
 
@@ -117,6 +121,7 @@ from .recorder import Act, Recorder, _envelope, restore, under
 from .rework import Superseded
 from .result import OverBudget, Result, RunError, WaitingForTasks
 from .scheduler import Scheduler
+from .slots import RunSlots
 from .stream import Stream
 from .transport import Transport
 from .recorder import SWITCHED
@@ -134,7 +139,8 @@ class Engine:
                  stopping: Callable[[], bool] | None = None, transport: Transport | None = None,
                  journal: JournalBackend | None = None, time_limit: float | None = None,
                  observe: Callable[[Mapping], None] | None = None, budget: Mapping[str, float] | None = None,
-                 firm: bool = False, rebuild: Callable[[dict], Node] | None = None, max_nodes: int | None = None):
+                 firm: bool = False, rebuild: Callable[[dict], Node] | None = None, max_nodes: int | None = None,
+                 shared_workers: bool = False):
         if workers < 0:
             raise ValueError("workers cannot be negative")
         if time_limit is not None and not time_limit > 0:
@@ -151,6 +157,7 @@ class Engine:
         self._ledger = Ledger(budget)
         self._id: str | None = None         # names this run: the first part of every activation's key
         self._waiting_tasks: dict[str, list[str]] = {}
+        self._slots = RunSlots(max(1, workers)) if shared_workers else None
         self._limit = time_limit
         self._firm = bool(firm)             # no node may give itself longer than time_limit
         self._parent: tuple | None = None   # (outer engine, the outer node's state, its activation's record)
@@ -700,6 +707,7 @@ class Engine:
                     with lock:
                         what, got = self._hear(state, ctx, ports, until)
             finally:
+                await self._aregain_slot(state)
                 with lock:
                     self._take_back(state)
                     state.since += time.monotonic() - began
@@ -950,6 +958,7 @@ class Engine:
                     with lock:
                         got = self._settled(state, ctx, rejection)
             finally:
+                await self._aregain_slot(state)
                 with lock:
                     self._take_back(state)
                     state.since += time.monotonic() - began
@@ -1076,7 +1085,40 @@ class Engine:
         """Run to the end in this thread: on an event loop when there are nodes to await, else in threads."""
         if self._asynchronous and not ended:
             return to_end(lambda: self._afinish())
-        return self._finish(ended)
+        parent = self._yield_parent_slot()
+        try:
+            return self._finish(ended)
+        finally:
+            if parent is not None:
+                outer, state = parent
+                with outer._lock:
+                    outer._regain_slot(state)
+
+    def _yield_parent_slot(self):
+        if self._slots is not None and self._parent is not None:
+            outer, state, _ = self._parent
+            if self._slots.release(state):
+                return outer, state
+        return None
+
+    def _regain_slot(self, state: State) -> None:
+        """Resume node code after a child drive or a blocking wait. Called under this engine's lock."""
+        slots = self._slots
+        if slots is not None:
+            try:
+                while not self._stopping() and not self._over and not slots.take(state, state):
+                    self._lock.wait(0.01)
+            finally:
+                slots.withdraw(state)
+
+    async def _aregain_slot(self, state: State) -> None:
+        slots = self._slots
+        if slots is not None:
+            try:
+                while not self._stopping() and not self._over and not slots.take(state, state):
+                    await asyncio.sleep(0.01)
+            finally:
+                slots.withdraw(state)
 
     def _finish(self, ended: bool = False) -> Result:
         try:
@@ -1105,6 +1147,15 @@ class Engine:
         return self._conclude()
 
     async def _afinish(self, ended: bool = False) -> Result:
+        parent = self._yield_parent_slot()
+        try:
+            return await self._async_drive(ended)
+        finally:
+            if parent is not None:
+                outer, state = parent
+                await outer._aregain_slot(state)
+
+    async def _async_drive(self, ended: bool) -> Result:
         try:
             if not ended:
                 await self._loop()
@@ -1120,6 +1171,8 @@ class Engine:
         return self._conclude()
 
     def _wind_down(self, ended: bool) -> None:
+        if self._slots is not None:
+            self._slots.withdraw(self)
         recorder = self._recorder
         if recorder is not None:
             if not ended and not self._sched.stopped and self._error is None and not self._unfinished():
@@ -1155,6 +1208,16 @@ class Engine:
         if self._error:                     # the observer failed on the last thing it was told
             raise self._error
         return result
+
+    def active_scopes(self) -> Iterable["Engine"]:
+        """Walk live drivers, releasing each scope's lock before entering another."""
+        with self._lock:
+            if self._over:
+                return
+            children = tuple(self._inside.values())
+        yield self
+        for child in children:
+            yield from child.active_scopes()
 
     def waiting_tasks(self) -> list[str]:
         """Task IDs parked by this drive, including waits reported by child graphs."""
@@ -1211,6 +1274,8 @@ class Engine:
     def _lend(self, state: State) -> None:
         """An activation starts to wait for a message: what it holds of the workers goes to another. Called
         under the lock."""
+        if self._slots is not None:
+            self._slots.release(state)
         self._waiters.add(state)
         state.waiting = True
         if state.node.asynchronous:
@@ -1223,6 +1288,8 @@ class Engine:
 
     def _take_back(self, state: State) -> None:
         """The waiting is over: one worker too many now, which leaves when it is next free. Under the lock."""
+        if not state.node.asynchronous:
+            self._regain_slot(state)
         self._waiters.discard(state)
         state.waiting = False
         if state.node.asynchronous:
@@ -1235,6 +1302,8 @@ class Engine:
 
     def _late(self, late: State) -> None:
         """An activation overran its time: the run fails, naming it. Called under the lock."""
+        if self._slots is not None:
+            self._slots.release(late)  # this activation has been abandoned by the driver
         if self._error is None:
             self._error = RunError(f"node {late.node.id} ran longer than {late.time_limit:g} seconds "
                                    f"in round {late.round}", late.node.id)
@@ -1252,12 +1321,19 @@ class Engine:
                 if self._outer is not None and not sched.stopped and self._outer():
                     sched.stopped = True
                 while not sched.ready and self._active and not sched.stopped and not self._retire:
+                    if self._slots is not None:
+                        self._slots.withdraw(self)
                     lock.wait()
                 if self._retire:
                     continue
                 if sched.stopped or not sched.ready:
+                    if self._slots is not None:
+                        self._slots.withdraw(self)
                     lock.notify_all()
                     return
+                if self._slots is not None and not self._slots.take(self, sched.ready[0]):
+                    lock.wait(0.01)
+                    continue
                 picked = self._pick()
             if picked is not None and not self._whole(picked):
                 return
@@ -1285,22 +1361,31 @@ class Engine:
         limit = self.workers or 1
 
         def done(task: asyncio.Task) -> None:
-            running.pop(task, None)
+            state = running.pop(task, None)
+            if task.cancelled() and self._slots is not None and state is not None:
+                # A scheduled coroutine can be cancelled before _one starts.
+                self._slots.release(state)
             wake.set()
         lock.hook = hook
         try:
             while True:
                 wake.clear()
+                awaiting_slot = False
                 with lock:
                     if self._outer is not None and not sched.stopped and self._outer():
                         sched.stopped = True
                     while sched.ready and not sched.stopped and len(running) - len(self._waiters) < limit:
+                        if self._slots is not None and not self._slots.take(self, sched.ready[0]):
+                            awaiting_slot = True
+                            break
                         picked = self._pick()
                         if picked is not None:
                             task = loop.create_task(self._one(picked, threads))
                             running[task] = picked[0]
                             task.add_done_callback(done)
-                    if not running:
+                    if self._slots is not None and (not sched.ready or sched.stopped):
+                        self._slots.withdraw(self)
+                    if not running and (not sched.ready or sched.stopped):
                         return
                     late, wait = overrun(states, time.monotonic()) if self._timed else (None, None)
                     if late is not None:
@@ -1308,6 +1393,8 @@ class Engine:
                 if late is not None:
                     await self._cancel(running)
                     return
+                if awaiting_slot:
+                    wait = 0.01 if wait is None else min(wait, 0.01)
                 if self._outer is not None:
                     wait = 0.05 if wait is None else min(wait, 0.05)
                 if wait is None:
@@ -1348,6 +1435,8 @@ class Engine:
             await self._aactivate(state, ctx, act, taken, cause)
         except BaseException as exc:   # noqa: BLE001 - whatever a node raises ends the run; cancelled, it was cut off
             failure = exc
+        if self._slots is not None:
+            self._slots.release(state)
         self._ended(state, ctx, act, failure)
 
     def _whole(self, picked: tuple) -> bool:
@@ -1360,6 +1449,8 @@ class Engine:
             self._activate(state, ctx, act, taken, cause)
         except BaseException as exc:   # noqa: BLE001 - whatever a node raises ends the run, an interrupt included
             failure = exc
+        if self._slots is not None:
+            self._slots.release(state)
         return self._ended(state, ctx, act, failure)
 
     # ---- one activation --------------------------------------------------------------------------------
@@ -1423,6 +1514,8 @@ class Engine:
                                       **(binding or {})})
                 state.bound = True
         except Exception as exc:   # noqa: BLE001 - a protocol's decode failed
+            if self._slots is not None:
+                self._slots.release(state)
             self._fail(state, exc)
             return None
         if pending is None:
@@ -2197,9 +2290,12 @@ class Engine:
                 state.inner[ctx.round] = journal
         told, id = self._observe, state.node.id
         observe = None if told is None else lambda event: told({**event, "within": [id, *event.get("within", ())]})
+        if self._slots is not None:
+            workers = min(workers, self._slots.limit, max(1, len(graph.nodes)))
         inner = Engine(graph, protocols, workers=workers, stopping=ctx.stopping, journal=journal,
                        time_limit=self._limit, observe=observe, firm=firm or self._firm, rebuild=self._rebuild,
                        max_nodes=self._max_nodes)
+        inner._slots = self._slots
         inner._parent = (self, state, ctx._act)
         inner._within = (*self._within, (state.node.id, ctx.round))
         inner._id = ctx.key

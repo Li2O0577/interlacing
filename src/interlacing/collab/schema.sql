@@ -13,9 +13,15 @@ CREATE TABLE IF NOT EXISTS il_runs (
 );
 -- Existing runs retain their original serial scheduling on resume.
 ALTER TABLE il_runs ADD COLUMN IF NOT EXISTS workers integer NOT NULL DEFAULT 0 CHECK(workers BETWEEN 0 AND 32);
+ALTER TABLE il_runs ADD COLUMN IF NOT EXISTS shared_workers boolean NOT NULL DEFAULT false;
 ALTER TABLE il_runs ADD COLUMN IF NOT EXISTS description json;
 ALTER TABLE il_runs ADD COLUMN IF NOT EXISTS origin json;
 CREATE INDEX IF NOT EXISTS il_runs_project ON il_runs(project,created);
+CREATE TABLE IF NOT EXISTS il_start_requests (
+    project text NOT NULL, actor text NOT NULL, request_key text NOT NULL,
+    fingerprint text NOT NULL, run uuid NOT NULL REFERENCES il_runs DEFERRABLE INITIALLY DEFERRED,
+    PRIMARY KEY(project,actor,request_key)
+);
 CREATE TABLE IF NOT EXISTS il_commands (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, run uuid NOT NULL REFERENCES il_runs,
     key text NOT NULL, done boolean NOT NULL DEFAULT false, UNIQUE(run,key)

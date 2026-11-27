@@ -213,7 +213,7 @@ def _member(part, catalog: Catalog, graphs: Mapping, taken: set) -> Node:
         id = next(name for name in (base, *(f"{base}_{i}" for i in range(2, len(taken) + 3))) if name not in taken)
     inner = {key: value for key, value in part.items() if key not in ("id", "firing")}
     built = load({**inner, "graphs": {**graphs, **inner.get("graphs", {})}}, catalog.inside(id))
-    return GraphNode(id, built, catalog.protocols, firing=part.get("firing"))
+    return GraphNode(id, built, catalog.protocols, workers=catalog.graph_workers(part), firing=part.get("firing"))
 
 
 def _method(d: Mapping, catalog: Catalog, graphs: Mapping):
@@ -243,7 +243,8 @@ def _method(d: Mapping, catalog: Catalog, graphs: Mapping):
 
         def make(id: str) -> Node:
             if "method" in member:
-                return GraphNode(id, _method(member, catalog.inside(id), graphs), catalog.protocols)
+                return GraphNode(id, _method(member, catalog.inside(id), graphs), catalog.protocols,
+                                 workers=catalog.graph_workers(member))
             return _node({**member, "id": id}, catalog, graphs)
         return Pool(_node(d["root"], catalog, graphs), make, size=d["size"], max_rounds=d["max_rounds"],
                     places=d.get("places", "member"), **options)

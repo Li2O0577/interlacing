@@ -79,10 +79,10 @@ def fork_run(db, project, run, at, inputs, execute, *, output=None, actor=None):
     saved_inputs.update(overrides)
     for name in overrides:
         resources.pop(name, None)
-    db.execute("INSERT INTO il_runs(id,project,graph,inputs,resources,assignments,state,workers,description,origin) "
-               "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+    db.execute("INSERT INTO il_runs(id,project,graph,inputs,resources,assignments,state,workers,shared_workers,description,origin) "
+               "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                (branch, project, encoded(source["graph"]), encoded(saved_inputs), encoded(resources),
-                encoded(source["assignments"]), "queued" if execute else "preview", source["workers"],
+                encoded(source["assignments"]), "queued" if execute else "preview", source["workers"], source["shared_workers"],
                 encoded(description) if description is not None else None, encoded(origin)))
     db.execute("INSERT INTO il_events VALUES (%s,'[]',1,%s)", (branch, encoded(fresh)))
     db.execute("INSERT INTO il_events SELECT %s,scope,seq,record FROM il_events "

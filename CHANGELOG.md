@@ -4,6 +4,12 @@ Versions before 1.0 may change any interface; each change is listed here. From 1
 by `interlacing` and the formats of graph files, run directories and journals change incompatibly only
 with a new major version.
 
+## Unreleased
+
+- Retry a PostgreSQL start request with the same optional request key to obtain its original run ID.
+- Open the collaboration service's `/review` page to claim and answer tasks and inspect revised inputs. See the [multi-user example](examples/review/model_review.py).
+- New PostgreSQL runs share an activation budget across nested blocks. Existing runs retain their scheduling configuration on upgrade.
+
 ## 0.17.0
 
 - Keep local JSONL runs as the default. SQLite run directories can opt into durable delivery, inspect earlier events and fork an independent run.
