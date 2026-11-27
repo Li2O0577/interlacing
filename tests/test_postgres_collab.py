@@ -817,3 +817,23 @@ def test_live_progress_before_completion_and_cursor_resume(service, tmp_path, mo
             gate.touch()
             http.shutdown()
             serving.result()
+
+
+def test_concurrent_keyed_start_replays_one_receipt(service):
+    db, lead, _, _ = service
+    args = dict(graph=REVIEW, inputs={'x': 'quote'}, request_key='review-1')
+    first, second = race(lambda: lead('start', **args), lambda: lead('start', **args))
+    assert first and first == second == lead('start', **args)
+    with pytest.raises(Refused, match='different start arguments'):
+        lead('start', **{**args, 'workers': 0})
+    assert [item['action'] for item in lead('audit')].count('run.start') == 1
+    assert work_one(db, 'worker')['run'] == first['run']
+    assert work_one(db, 'worker') is None
+
+
+def test_invalid_start_does_not_consume_key(service):
+    db, lead, _, _ = service
+    with pytest.raises(Refused):
+        lead('start', graph=REVIEW, assignments={'review': 'unknown'}, request_key='retry')
+    run = lead('start', graph=REVIEW, inputs={'x': 'quote'}, request_key='retry')
+    assert work_one(db, 'worker')['run'] == run['run']

@@ -16,6 +16,10 @@ class Refused(ValueError):
     """The requested operation conflicts with the actor's permissions or the stored state."""
 
 
+class RequestConflict(Refused):
+    """The caller reused a start key with different arguments."""
+
+
 class LostLease(Refused):
     """Another generation owns the run, or this lease has expired."""
 
