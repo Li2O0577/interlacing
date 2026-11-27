@@ -61,10 +61,10 @@ class Database:
             db.execute("CREATE TABLE IF NOT EXISTS il_schema (singleton boolean PRIMARY KEY CHECK(singleton), "
                        "version integer NOT NULL)")
             db.execute("INSERT INTO il_schema VALUES (true,1) ON CONFLICT DO NOTHING")
-            if db.execute("SELECT version FROM il_schema WHERE singleton").fetchone()["version"] not in (1, 2):
+            if db.execute("SELECT version FROM il_schema WHERE singleton").fetchone()["version"] not in (1, 2, 3):
                 raise Refused("unsupported collaboration database version")
             db.execute(files(__package__).joinpath("schema.sql").read_text(encoding="utf-8"))
-            db.execute("UPDATE il_schema SET version=2 WHERE singleton AND version=1")
+            db.execute("UPDATE il_schema SET version=3 WHERE singleton AND version<3")
 
     @contextmanager
     def fenced(self, lease: Lease):

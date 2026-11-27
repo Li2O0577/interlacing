@@ -222,7 +222,7 @@ def graph(d, catalog, graphs):
             raise SpecError(f"{d['id']}: the description has no graph {inner[:12]} under \"graphs\"")
         inner = graphs[inner]
     return GraphNode(d["id"], load({**inner, "graphs": {**graphs, **inner.get("graphs", {})}}, catalog.inside(d["id"])),
-                     catalog.protocols, firing=d.get("firing"))
+                     catalog.protocols, workers=catalog.graph_workers(d["config"]), firing=d.get("firing"))
 
 
 def block(d, catalog, graphs):
@@ -246,9 +246,7 @@ def block(d, catalog, graphs):
     given, own = c.get("defaults") or {}, inner.get("defaults") or {}
     defaults = {kind: {**own.get(kind, {}), **given.get(kind, {})} for kind in own.keys() | given.keys()}
     inner = {**inner, "defaults": defaults, "graphs": {**graphs, **inner.get("graphs", {})}}
-    workers = c.get("workers", 0)
-    if catalog.max_workers is not None and type(workers) is int:
-        workers = min(workers, catalog.max_workers)
+    workers = catalog.graph_workers(c)
     return GraphNode(d["id"], load(inner, catalog.inside(d["id"])), catalog.protocols, workers=workers, firing=d.get("firing"))
 
 

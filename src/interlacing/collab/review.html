@@ -41,6 +41,7 @@ function field(panel,label,value) {
 }
 function fail(error) { el('status').textContent=error.message; }
 async function show(id) {
+  if(selected!==id) el('detail').replaceChildren(element('p','正在读取任务…'));
   selected=id;
   const page=++generation, result=await api('review',{task:id});
   if(page!==generation) return;

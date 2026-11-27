@@ -246,7 +246,7 @@ The full description is [docs/GRAPH.en.md](docs/GRAPH.en.md) (also [in Chinese](
 
 A manager can fork an approved quote, change its value and send it back to the affected reviewer while retaining the original approval. The PostgreSQL service also streams root run progress and supports bounded retries for transient failures. See the [service guide and examples](docs/POSTGRES.md). The [capability review against LangGraph (Chinese)](docs/LANGGRAPH_COMPARISON.md) records the tested scheduling difference and the limits of the service API.
 
-For the matching source and guides of a published version, open its tag on the [GitHub releases page](https://github.com/Li2O0577/interlacing/releases). The [branch review](docs/BRANCH_REVIEW.md) records reproduced issues and recovery checks. The [implementation plan](docs/NEXT_PLAN.md) covers the delivered features and the remaining work on duplicate start requests and nested parallelism. Both documents are in Chinese.
+For the matching source and guides of a published version, open its tag on the [GitHub releases page](https://github.com/Li2O0577/interlacing/releases). The [branch review](docs/BRANCH_REVIEW.md) records reproduced issues and recovery checks. The [implementation plan](docs/NEXT_PLAN.md) covers the delivered features and the remaining deployment checks. Both documents are in Chinese.
 
 ## Tests
 

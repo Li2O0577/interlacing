@@ -54,7 +54,7 @@ class Collaboration:
 
     def request(self, token, action, args):
         with self.database.connect() as db:
-            if action in ("history", "progress", "inspect", "checkpoints", "fork"):
+            if action in ("history", "progress", "inspect", "checkpoints", "fork", "review"):
                 db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             actor = db.execute("SELECT project,name,role FROM il_members WHERE secret=%s FOR SHARE",
                                (_secret(token),)).fetchone()
@@ -174,7 +174,7 @@ class Collaboration:
             item = self._resource(db, actor, **ref)
             inputs[port] = item["data"] if "data" in item else item
         assignments = assignments or {}
-        db.execute("INSERT INTO il_runs(id,project,graph,inputs,resources,assignments,workers) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        db.execute("INSERT INTO il_runs(id,project,graph,inputs,resources,assignments,workers,shared_workers) VALUES (%s,%s,%s,%s,%s,%s,%s,true)",
                    (run, actor["project"], encoded(graph), encoded(inputs), encoded(resources), encoded(assignments), workers))
         db.execute("INSERT INTO il_commands(run,key) VALUES (%s,'start')", (run,))
         audit(db, actor["project"], actor["name"], "run.start", run, {"resources": resources})

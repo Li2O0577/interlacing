@@ -56,7 +56,7 @@ def _bind_task(db, lease, task, node, turn):
 def execute(database: Database, lease: Lease, *, seconds=30, allow=(), models=None):
     """Drive the command until it finishes or waits. Reclaim after a worker exits via Database.claim."""
     with database.fenced(lease) as db:
-        run = db.execute("SELECT graph,inputs,project,assignments,workers,description IS NULL AS first_load "
+        run = db.execute("SELECT graph,inputs,project,assignments,workers,shared_workers,description IS NULL AS first_load "
                          "FROM il_runs WHERE id=%s", (lease.run,)).fetchone()
 
         authorization = db.execute("SELECT COALESCE(MAX(id),0) AS id FROM il_commands "
@@ -98,12 +98,17 @@ def execute(database: Database, lease: Lease, *, seconds=30, allow=(), models=No
                 if time.monotonic() >= renew_at:
                     database.renew(lease, seconds)
                     renew_at = time.monotonic() + seconds / 3
-                if engine is not None and (tasks := engine.waiting_tasks()):
-                    with database.connect() as db:
-                        rows = db.execute("SELECT id::text AS task FROM il_tasks WHERE run=%s AND id=ANY(%s::uuid[]) "
-                                          "AND state IN ('submitted','superseded')", (lease.run, tasks)).fetchall()
-                    if rows:
-                        engine.wake_tasks({row["task"] for row in rows})
+                if engine is not None:
+                    scopes = [(scope, tasks) for scope in engine.active_scopes() if (tasks := scope.waiting_tasks())]
+                    if scopes:
+                        parked = [task for _, tasks in scopes for task in tasks]
+                        with database.connect() as db:
+                            rows = db.execute("SELECT id::text AS task FROM il_tasks WHERE run=%s AND id=ANY(%s::uuid[]) "
+                                              "AND state IN ('submitted','superseded')", (lease.run, parked)).fetchall()
+                        ready = {row["task"] for row in rows}
+                        for scope, tasks in scopes:
+                            if not ready.isdisjoint(tasks):
+                                scope.wake_tasks(ready)
             except (LostLease, database.driver.Error):
                 lost.set()
                 return
@@ -112,7 +117,9 @@ def execute(database: Database, lease: Lease, *, seconds=30, allow=(), models=No
     thread.start()
     try:
         try:
-            catalog = Catalog(allow=allow, models=models, ask_typed=ask, max_workers=0,
+            nested = run["workers"] if run["shared_workers"] else 0
+            catalog = Catalog(allow=allow, models=models, ask_typed=ask, max_workers=nested,
+                              default_workers=nested,
                               protocols=standard(RunStore(database, lease, run["project"])))
             graph = load(run["graph"], catalog)
             if run["first_load"]:
@@ -121,7 +128,7 @@ def execute(database: Database, lease: Lease, *, seconds=30, allow=(), models=No
                 db.execute("UPDATE il_runs SET description=%s WHERE id=%s AND description IS NULL",
                            (encoded(graph.describe()), lease.run))
             engine = Engine(graph, catalog.protocols, workers=run["workers"], journal=journal,
-                            stopping=lost.is_set,
+                            stopping=lost.is_set, shared_workers=run["shared_workers"],
                             rebuild=lambda spec: load_node(spec, catalog))
             result = engine.go(run["inputs"])
             state, value = ("done" if result.complete else "stopped"), asdict(result)

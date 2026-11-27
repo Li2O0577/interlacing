@@ -241,7 +241,7 @@ interlacing resume --dir /tmp/run                                               
 
 主管可以从已签字的报价另开一条运行，修改金额，让受影响的审核人重新签字，同时保留原审批记录。主管也可以订阅根图进度，为耗尽自动尝试的暂时故障发起新一轮重试。[协作服务说明与示例](docs/POSTGRES.md)。[与 LangGraph 的任务对照和检测记录](docs/LANGGRAPH_COMPARISON.md)列出了本地与服务端能运行哪些图，以及哪些能力已有对照实验。
 
-[分支审查报告](docs/BRANCH_REVIEW.md)记录了可复现的问题、测试环境和备份恢复结果。[下一轮实施计划](docs/NEXT_PLAN.md)列出已交付能力，以及创建请求去重、嵌套并行等后续工作。
+[分支审查报告](docs/BRANCH_REVIEW.md)记录了可复现的问题、测试环境和备份恢复结果。[下一轮实施计划](docs/NEXT_PLAN.md)列出已交付能力，以及后续容量及部署验证工作。
 
 ## 测试
 

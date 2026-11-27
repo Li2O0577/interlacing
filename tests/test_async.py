@@ -288,3 +288,47 @@ def test_an_inner_graph_is_awaited_on_the_same_loop():
         return (await inner.arun({'in': x})).last('out')
     graph = Chain(fn('outer', outer, context=True)).build(DEFAULT)
     assert Engine(graph, DEFAULT).run({'in': 2}).last('out') == 6
+
+
+def test_shared_slots_cancel_nested_async_work_before_next_admission():
+    from interlacing import GraphBuilder, GraphNode
+    started = threading.Event()
+    later = threading.Event()
+
+    async def wait(ctx):
+        started.set()
+        while not ctx.stopping():
+            await asyncio.sleep(0.01)
+
+    async def untouched():
+        later.set()
+
+    child = GraphBuilder().add(FunctionNode('wait', wait, inputs=[], outputs=[], context=True),
+                               FunctionNode('next', untouched, inputs=[], outputs=[])).compile(DEFAULT)
+    root = GraphBuilder().add(GraphNode('group', child, workers=2)).compile(DEFAULT)
+    engine = Engine(root, workers=1, shared_workers=True)
+
+    async def main():
+        task = asyncio.create_task(engine.arun())
+        assert await asyncio.to_thread(started.wait, 3)
+        engine.stop()
+        result = await asyncio.wait_for(task, 3)
+        assert not result.complete
+
+    asyncio.run(main())
+    assert not later.is_set()
+
+
+def test_timed_out_child_returns_while_abandoned_thread_is_still_alive():
+    from interlacing import GraphBuilder, GraphNode
+    release = threading.Event()
+    task = FunctionNode('slow', lambda: release.wait(3), inputs=[], outputs=[Port('answer')])
+    task.time_limit = 0.06
+    graph = GraphBuilder().add(GraphNode('group', GraphBuilder().add(task).compile(DEFAULT))).compile(DEFAULT)
+    began = time.monotonic()
+    try:
+        with pytest.raises(RunError, match="longer than"):
+            Engine(graph, workers=1, shared_workers=True).run()
+        assert time.monotonic() - began < 2
+    finally:
+        release.set()
