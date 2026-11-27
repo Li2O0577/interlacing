@@ -156,6 +156,15 @@ Set `INTERLACING_TEST_POSTGRES` to a dedicated test database and run `python -m 
 
 After upgrading, run `interlacing collab init`. In a test project, have the manager create Alice and Bob as described above. From the repository root, enter `examples/review` and run `python -m interlacing.cli collab worker --allow model_review`. In another terminal in the same directory, set `MANAGER_TOKEN` and run `python model_review.py`. Keep the returned run UUID.
 
+The review page currently uses Chinese labels. Use these controls during the exercise.
+
+| On screen | Meaning |
+|---|---|
+| 项目成员令牌 / 进入工作台 | Enter your project member token and open the workspace. |
+| 刷新任务 | Refresh your task list. |
+| 认领任务 / 提交答复 | Claim an open task or submit the answer to your assigned task. |
+| 上次审核的输入 / 本次审核的输入 | Compare the input from the previous review with the input for this review. |
+
 1. Alice and Bob open `/review` and enter their own tokens. Alice submits the integer 9 for q1 and 5 for the independent q3. Bob refreshes, reads the q1 result and submits 18 for q2.
 2. Once the original run finishes, the manager runs `python model_review.py --revise ORIGINAL_RUN_UUID --value 12` to create an independent fork.
 3. Bob refreshes and opens q2 in the new run. He can compare the old input 9 with the new input 12, see who changed it and why, and submit 24. The fork reuses Alice's q3. Its report contains 24 and 5. The original still contains 18 and 5.

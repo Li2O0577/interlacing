@@ -254,7 +254,7 @@ The [release graph](../examples/data/release.json) already connects `steps.draft
 >>> job = lead.request("start", graph=graph, inputs={"topic": "tides"}, assignments={"editor": "Alice"})
 ```
 
-Give Alice her member token (`reviewer["token"]`). On the same machine, open `http://127.0.0.1:8765/review` as Alice, refresh the tasks, open **editor**, and submit `{"approved": true}`. A remote reviewer uses the service URL provided by the operator. Once the worker finishes, check the result in the manager’s Python session.
+Give Alice her member token (`reviewer["token"]`). On the same machine, open `http://127.0.0.1:8765/review` as Alice, select **刷新任务** (refresh tasks), open **editor**, and use **提交答复** (submit answer) to send `{"approved": true}`. A remote reviewer uses the service URL provided by the operator. Once the worker finishes, check the result in the manager’s Python session.
 
 ```pycon
 >>> lead.request("status", run=job["run"])["result"]["outputs"]["result"]
