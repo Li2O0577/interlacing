@@ -59,7 +59,15 @@ jobs:
           PGHOST: localhost
           PGUSER: postgres
           PGPASSWORD: test
-        run: python scripts/rehearse_deployment.py
+        run: |
+          if [ ! -x /usr/lib/postgresql/16/bin/pg_restore ]; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client-16
+          fi
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          pg_dump --version
+          pg_restore --version
+          python scripts/rehearse_deployment.py
 
   other-systems:
     runs-on: ${{ matrix.os }}

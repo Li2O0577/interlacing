@@ -4,7 +4,7 @@
 
 ## 先跑完整演示
 
-在仓库根目录安装项目。演练需要本机可以调用 PostgreSQL 客户端程序及 GNU `sha256sum`。
+在仓库根目录安装项目。本手册在 PostgreSQL 16 服务端和 16 版客户端组合上验收。先核对 `pg_dump --version` 和 `pg_restore --version`。如果 Linux 安装了多个大版本，选择 16 版客户端，例如执行 `export PATH="/usr/lib/postgresql/16/bin:$PATH"`。新版工具生成的恢复语句可能被旧服务器拒绝。演练还需要 GNU `sha256sum`。
 
 ```sh
 python3 -m venv /opt/interlacing/venv
