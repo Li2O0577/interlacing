@@ -140,14 +140,14 @@ branch = client.request("fork", run=run_id, at=position, output=edit, execute=Tr
 
 人工答复、续跑命令和审计记录在同一事务提交。任务绑定运行、节点位置、激活轮次和版本。当消息修订使人工节点或包含它的子图需要重算，相关待办会在消息提交事务内失效。旧任务拒收答复，新任务展示修订后的请求。校验失败的提交保留原任务状态。共享目录提供文件字节，数据库备份应搭配该目录的备份。操作系统级执行隔离以及跨主机内容目录的部署由宿主管理。
 
-本分支已实测停写后同时备份 PostgreSQL 与内容目录，在独立数据库恢复后读取原文件并完成原待办。持续写入时取得两者一致快照、跨主机恢复和恢复耗时仍需验证。[恢复演练记录](BRANCH_REVIEW.md)
+本分支已实测停写后同时备份 PostgreSQL 与内容目录，在独立数据库恢复后读取原文件并完成原待办。单机持续写入时的快照备份及恢复也已通过。跨主机验收步骤与实测时长见[部署手册](DEPLOY.md)。[恢复演练记录](BRANCH_REVIEW.md)
 
 使用独立的测试数据库设置 `INTERLACING_TEST_POSTGRES` 后，运行 `python -m pytest -q tests/test_postgres_collab.py`，可验证双进程执行、租约接管、并发认领、提交回滚、任务和资料访问范围。
 
 ## 在浏览器里审核一次数学建模返工
 
 升级后先运行 `interlacing collab init`。使用测试项目，主管按前面的步骤创建成员 Alice 和 Bob。
-从仓库根目录进入 `examples/review`，在该目录启动 `interlacing collab worker --allow model_review`。
+从仓库根目录进入 `examples/review`，在该目录启动 `python -m interlacing.cli collab worker --allow model_review`。
 另一个终端设置主管令牌环境变量 `MANAGER_TOKEN`，在相同目录执行 `python model_review.py`，记下返回的运行 UUID。
 
 1. Alice 和 Bob 分别打开服务的 `/review`，输入各自的成员令牌。Alice 为 q1 提交整数 9，为独立的 q3 提交 5。Bob 刷新后读取 q1 的结果，在 q2 提交预测值 18。

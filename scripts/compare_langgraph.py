@@ -1,8 +1,10 @@
 """Optional comparison probes. See docs/LANGGRAPH_COMPARISON.md for pinned dependencies."""
+import argparse
+from collections import Counter
 from importlib.metadata import version
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Event
+from time import monotonic_ns, sleep
 from typing import TypedDict
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -60,19 +62,16 @@ class Branches(TypedDict, total=False):
 
 
 def check_scheduling(path):
-    release_slow = Event()
-    slow_done = Event()
-    received = Event()
+    observed = {}
+    start = monotonic_ns()
 
     def slow(state):
-        if not release_slow.wait(10):
-            raise TimeoutError("fast update never reached the observer")
-        slow_done.set()
+        sleep(0.05)
+        observed["slow_done"] = monotonic_ns()
         return {"slow_value": 3}
 
     def consume(state):
-        assert slow_done.is_set()
-        received.set()
+        observed["consume"] = monotonic_ns()
         return {"received": state["fast_value"]}
 
     builder = StateGraph(Branches)
@@ -87,19 +86,25 @@ def check_scheduling(path):
     config = {"configurable": {"thread_id": "branches"}}
     with SqliteSaver.from_conn_string(str(path)) as saver:
         graph = builder.compile(checkpointer=saver)
-        try:
-            for update in graph.stream({}, config, stream_mode="updates", durability="sync"):
-                if "fast" in update:
-                    assert not slow_done.is_set() and not received.is_set()
-                    release_slow.set()
-        finally:
-            release_slow.set()
-        assert received.is_set() and graph.get_state(config).values["received"] == 2
-    print("LangGraph: observer saw fast update before slow finished; dependent node ran after slow finished.")
+        for update in graph.stream({}, config, stream_mode="updates", durability="sync"):
+            if "fast" in update:
+                observed["observer"] = monotonic_ns()
+        assert graph.get_state(config).values["received"] == 2
+    assert observed["slow_done"] <= observed["consume"]
+    print(" ".join(f"{name}={(observed[name] - start) / 1e6:.2f}ms"
+                   for name in ("observer", "slow_done", "consume")))
+    return "observer_before_slow" if observed["observer"] < observed["slow_done"] else "observer_at_or_after_slow"
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repeat", type=int, default=10)
+    args = parser.parse_args()
+    if args.repeat < 1:
+        parser.error("--repeat must be positive")
     print("langgraph", version("langgraph"), "langgraph-checkpoint-sqlite", version("langgraph-checkpoint-sqlite"))
     with TemporaryDirectory() as temp:
         check_review(Path(temp) / "review.sqlite")
-        check_scheduling(Path(temp) / "branches.sqlite")
+        counts = Counter(check_scheduling(Path(temp) / f"branches-{i}.sqlite") for i in range(args.repeat))
+        print("Observer before slow completion:", counts["observer_before_slow"],
+              "at or after:", counts["observer_at_or_after_slow"])

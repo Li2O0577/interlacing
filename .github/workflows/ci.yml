@@ -36,7 +36,8 @@ jobs:
           cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/.clean-env/bin/python" "$GITHUB_WORKSPACE/scripts/package_smoke.py" "$GITHUB_WORKSPACE/examples/graphs"
 
   postgres:
-    runs-on: ubuntu-latest
+    # Ubuntu 24.04 supplies the matching PostgreSQL 16 client for the restore drill.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16
@@ -54,6 +55,20 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install -e '.[postgres]' pytest
       - run: python -m pytest -q tests/test_postgres_collab.py
+      - name: Rehearse the HTTP demo, online backup and recovery
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGPASSWORD: test
+        run: |
+          if [ ! -x /usr/lib/postgresql/16/bin/pg_restore ]; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client-16
+          fi
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          pg_dump --version
+          pg_restore --version
+          python scripts/rehearse_deployment.py
 
   other-systems:
     runs-on: ${{ matrix.os }}
